@@ -13,10 +13,18 @@ namespace ProgettoBattaglino
     public partial class Form1 : Form
     {
         // =========================
+        //  COSTANTI / PERCORSI
+        // =========================
+        private const string ImportFolderPath = @"C:\Users\Luca\Desktop\scuola\PROGETTO\ProgettoBattaglino\ProgettoBattaglino\Registrazioni";
+
+        // =========================
         //  LAYOUT UI (DAW)
         // =========================
+        private MenuStrip menuStripMain;
+        private ToolStripMenuItem menuFile;
+        private ToolStripMenuItem menuImporta;
+
         private Panel pnlTopBar;
-        private Panel pnlLeft;
         private Panel pnlCenter;
         private Panel pnlBottomMixer;
 
@@ -35,6 +43,7 @@ namespace ProgettoBattaglino
         private int timelineOffsetX = 0;
         private int rowHeight = 70;
         private const int HeaderW = 170;
+        private const int TrackTopPadding = 60;
         private float timelineSeconds = 10f;
 
         // Playhead
@@ -109,6 +118,8 @@ namespace ProgettoBattaglino
             KeyPreview = true;
             KeyDown += Form1_KeyDown;
 
+            BuildMenu();
+
             // TOP BAR
             pnlTopBar = new Panel
             {
@@ -129,16 +140,6 @@ namespace ProgettoBattaglino
             Controls.Add(pnlBottomMixer);
             BuildMixer();
 
-            // LEFT PANEL
-            pnlLeft = new Panel
-            {
-                Dock = DockStyle.Left,
-                Width = 280,
-                BackColor = Color.FromArgb(34, 37, 45)
-            };
-            Controls.Add(pnlLeft);
-            BuildLeftPanel();
-
             // CENTER
             pnlCenter = new Panel
             {
@@ -146,6 +147,20 @@ namespace ProgettoBattaglino
                 BackColor = Color.FromArgb(28, 30, 36)
             };
             Controls.Add(pnlCenter);
+
+            // HSCROLL
+            hScroll = new HScrollBar
+            {
+                Dock = DockStyle.Bottom,
+                Height = 16
+            };
+            hScroll.Scroll += (s, e) =>
+            {
+                timelineOffsetX = hScroll.Value;
+                pnlRuler.Invalidate();
+                pnlTrackSurface.Invalidate();
+            };
+            pnlCenter.Controls.Add(hScroll);
 
             // RULER
             pnlRuler = new Panel
@@ -171,7 +186,7 @@ namespace ProgettoBattaglino
             pnlTrackSurface.MouseUp += PnlTrackSurface_MouseUp;
             pnlCenter.Controls.Add(pnlTrackSurface);
 
-            // Scrollbars
+            // VSCROLL
             vScroll = new VScrollBar
             {
                 Dock = DockStyle.Right,
@@ -180,24 +195,39 @@ namespace ProgettoBattaglino
             vScroll.Scroll += (s, e) => pnlTrackSurface.Invalidate();
             pnlTrackSurface.Controls.Add(vScroll);
 
-            hScroll = new HScrollBar
-            {
-                Dock = DockStyle.Bottom,
-                Height = 16
-            };
-            hScroll.Scroll += (s, e) =>
-            {
-                timelineOffsetX = hScroll.Value;
-                pnlRuler.Invalidate();
-                pnlTrackSurface.Invalidate();
-            };
-            pnlCenter.Controls.Add(hScroll);
-
             // Timer playhead
             timerPlay = new Timer { Interval = 30 };
             timerPlay.Tick += timerPlay_Tick;
 
             Resize += (s, e) => LayoutAll();
+
+            pnlRuler.BringToFront();
+        }
+
+        private void BuildMenu()
+        {
+            menuStripMain = new MenuStrip
+            {
+                Dock = DockStyle.Top,
+                BackColor = Color.FromArgb(45, 49, 58),
+                ForeColor = Color.White
+            };
+
+            menuFile = new ToolStripMenuItem("File");
+            menuImporta = new ToolStripMenuItem("Importa");
+
+            menuImporta.Click += MenuImporta_Click;
+
+            menuFile.DropDownItems.Add(menuImporta);
+            menuStripMain.Items.Add(menuFile);
+
+            MainMenuStrip = menuStripMain;
+            Controls.Add(menuStripMain);
+        }
+
+        private void MenuImporta_Click(object sender, EventArgs e)
+        {
+            ImportAudioFile();
         }
 
         private void BuildTopBar()
@@ -247,63 +277,105 @@ namespace ProgettoBattaglino
             return b;
         }
 
-        private void BuildLeftPanel()
+        // =========================
+        //  IMPORT AUDIO
+        // =========================
+        private void ImportAudioFile()
         {
-            var gbBrowser = new GroupBox
+            try
             {
-                Text = "File Browser",
-                Dock = DockStyle.Top,
-                Height = 270,
-                ForeColor = Color.Gainsboro,
-                BackColor = Color.FromArgb(34, 37, 45)
-            };
-            pnlLeft.Controls.Add(gbBrowser);
+                if (!Directory.Exists(ImportFolderPath))
+                {
+                    MessageBox.Show("La cartella di importazione non esiste:\n" + ImportFolderPath,
+                        "Errore",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    return;
+                }
 
-            var tv = new TreeView
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(26, 28, 34),
-                ForeColor = Color.Gainsboro,
-                BorderStyle = BorderStyle.None
-            };
-            tv.Nodes.Add("Desktop");
-            tv.Nodes.Add("Documents");
-            tv.Nodes.Add("Music");
-            gbBrowser.Controls.Add(tv);
+                using (OpenFileDialog ofd = new OpenFileDialog())
+                {
+                    ofd.Title = "Importa registrazione";
+                    ofd.InitialDirectory = ImportFolderPath;
+                    ofd.Filter = "File audio|*.wav;*.mp3;*.aiff;*.wma|Tutti i file|*.*";
+                    ofd.Multiselect = false;
+                    ofd.RestoreDirectory = false;
 
-            var gbPlugins = new GroupBox
-            {
-                Text = "Instrument Plugins",
-                Dock = DockStyle.Top,
-                Height = 240,
-                ForeColor = Color.Gainsboro,
-                BackColor = Color.FromArgb(34, 37, 45)
-            };
-            pnlLeft.Controls.Add(gbPlugins);
+                    if (ofd.ShowDialog() != DialogResult.OK)
+                        return;
 
-            var lst = new ListBox
+                    AddImportedClipToFirstFreeTrack(ofd.FileName);
+                }
+            }
+            catch (Exception ex)
             {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(26, 28, 34),
-                ForeColor = Color.Gainsboro,
-                BorderStyle = BorderStyle.None
-            };
-            lst.Items.AddRange(new object[]
-            {
-                "Audio Plugin",
-                "Piano Plugin",
-                "Drum Plugin",
-                "Synth Plugin",
-                "Reverb Plugin",
-                "Rustico Plugin"
-            });
-            gbPlugins.Controls.Add(lst);
+                MessageBox.Show("Errore durante l'importazione:\n" + ex.Message,
+                    "Errore",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
 
-            pnlLeft.Controls.Add(new Panel
+        private void AddImportedClipToFirstFreeTrack(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
             {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(34, 37, 45)
-            });
+                MessageBox.Show("File non valido.");
+                return;
+            }
+
+            float durationSec;
+            using (var reader = new AudioFileReader(filePath))
+            {
+                durationSec = (float)reader.TotalTime.TotalSeconds;
+            }
+
+            if (durationSec < 0.05f)
+                durationSec = 0.05f;
+
+            int freeLane = GetFirstFreeLaneIndex();
+
+            var newClip = new AudioClipInfo
+            {
+                FilePath = filePath,
+                DisplayName = Path.GetFileNameWithoutExtension(filePath),
+                StartSec = 0f,
+                DurationSec = durationSec,
+                LaneIndex = freeLane,
+                Volume = 1f,
+                Peaks = BuildWaveformPeaks(filePath, 2500)
+            };
+
+            clips.Add(newClip);
+            selectedClipIndex = clips.IndexOf(newClip);
+
+            UpdateProjectLength();
+
+            playheadSec = 0f;
+            showPlayhead = false;
+            timelineOffsetX = 0;
+
+            if (hScroll != null)
+                hScroll.Value = hScroll.Minimum;
+
+            if (vScroll != null)
+                vScroll.Value = vScroll.Minimum;
+
+            RebuildMixerTracks();
+            LayoutAll();
+
+            pnlRuler.Refresh();
+            pnlTrackSurface.Refresh();
+        }
+
+        private int GetFirstFreeLaneIndex()
+        {
+            int lane = 0;
+
+            while (clips.Any(c => c.LaneIndex == lane))
+                lane++;
+
+            return lane;
         }
 
         // =========================
@@ -345,10 +417,12 @@ namespace ProgettoBattaglino
                 return;
             }
 
-            for (int i = 0; i < clips.Count; i++)
+            var orderedClips = clips.OrderBy(c => c.LaneIndex).ToList();
+
+            for (int visualIndex = 0; visualIndex < orderedClips.Count; visualIndex++)
             {
-                int clipIndex = i;
-                AudioClipInfo clip = clips[clipIndex];
+                AudioClipInfo clip = orderedClips[visualIndex];
+                int clipIndex = clips.IndexOf(clip);
 
                 var strip = new Panel
                 {
@@ -363,7 +437,7 @@ namespace ProgettoBattaglino
 
                 var lblTrack = new Label
                 {
-                    Text = $"TRACK {clipIndex + 1}",
+                    Text = $"TRACK {clip.LaneIndex + 1}",
                     ForeColor = Color.Gainsboro,
                     AutoSize = true,
                     Font = new Font("Segoe UI", 10, FontStyle.Bold),
@@ -404,8 +478,7 @@ namespace ProgettoBattaglino
                     TickStyle = TickStyle.None,
                     Height = 100,
                     Width = 40,
-                    Location = new Point(35, 82),
-                    Tag = clipIndex
+                    Location = new Point(35, 82)
                 };
 
                 trkVolume.Scroll += (s, e) =>
@@ -421,7 +494,6 @@ namespace ProgettoBattaglino
                 lblTrack.MouseDown += MixerTrack_MouseDown;
                 lblName.MouseDown += MixerTrack_MouseDown;
                 lblVol.MouseDown += MixerTrack_MouseDown;
-                trkVolume.MouseDown += MixerTrack_MouseDown;
 
                 strip.Controls.Add(trkVolume);
                 pnlMixerTracks.Controls.Add(strip);
@@ -457,7 +529,7 @@ namespace ProgettoBattaglino
 
         private void StartRecording()
         {
-            string recDir = Path.Combine(Application.StartupPath, "Registrazioni");
+            string recDir = ImportFolderPath;
             Directory.CreateDirectory(recDir);
 
             string fileName = "Rec_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".wav";
@@ -542,13 +614,13 @@ namespace ProgettoBattaglino
                     DisplayName = Path.GetFileNameWithoutExtension(lastRecord),
                     StartSec = 0f,
                     DurationSec = durationSec,
-                    LaneIndex = clips.Count,
+                    LaneIndex = GetFirstFreeLaneIndex(),
                     Volume = 1f,
                     Peaks = BuildWaveformPeaks(lastRecord, 2500)
                 };
 
                 clips.Add(newClip);
-                selectedClipIndex = clips.Count - 1;
+                selectedClipIndex = clips.IndexOf(newClip);
 
                 UpdateProjectLength();
 
@@ -558,6 +630,9 @@ namespace ProgettoBattaglino
 
                 if (hScroll != null)
                     hScroll.Value = hScroll.Minimum;
+
+                if (vScroll != null)
+                    vScroll.Value = vScroll.Minimum;
 
                 RebuildMixerTracks();
                 LayoutAll();
@@ -683,7 +758,8 @@ namespace ProgettoBattaglino
                 else
                 {
                     float localStart = playheadSec - clip.StartSec;
-                    if (localStart < 0f) localStart = 0f;
+                    if (localStart < 0f)
+                        localStart = 0f;
 
                     reader.CurrentTime = TimeSpan.FromSeconds(localStart);
                     mixerInputs.Add(reader);
@@ -832,30 +908,38 @@ namespace ProgettoBattaglino
         {
             pnlTrackSurface.Focus();
 
-            int hitClipIndex = HitTestClip(e.Location);
-
-            if (e.Button == MouseButtons.Left && hitClipIndex >= 0)
+            if (sender == pnlTrackSurface)
             {
-                SelectClip(hitClipIndex);
+                int hitClipIndex = HitTestClip(e.Location);
 
-                if (!isRecording && (outputDevice == null || outputDevice.PlaybackState != PlaybackState.Playing))
+                if (e.Button == MouseButtons.Left && hitClipIndex >= 0)
                 {
-                    isDraggingClip = true;
-                    draggingClipIndex = hitClipIndex;
-                    dragStartMouseX = e.X;
-                    dragStartClipSec = clips[hitClipIndex].StartSec;
-                    pnlTrackSurface.Capture = true;
-                    pnlTrackSurface.Cursor = Cursors.SizeWE;
+                    SelectClip(hitClipIndex);
+
+                    if (!isRecording && (outputDevice == null || outputDevice.PlaybackState != PlaybackState.Playing))
+                    {
+                        isDraggingClip = true;
+                        draggingClipIndex = hitClipIndex;
+                        dragStartMouseX = e.X;
+                        dragStartClipSec = clips[hitClipIndex].StartSec;
+                        pnlTrackSurface.Capture = true;
+                        pnlTrackSurface.Cursor = Cursors.SizeWE;
+                    }
+
+                    return;
                 }
 
-                return;
+                int lane = GetLaneFromY(e.Y);
+                if (lane >= 0)
+                {
+                    int clipInLane = clips.FindIndex(c => c.LaneIndex == lane);
+                    SelectClip(clipInLane);
+                }
+                else
+                {
+                    SelectClip(-1);
+                }
             }
-
-            int lane = GetLaneFromY(e.Y);
-            if (lane >= 0 && lane < clips.Count)
-                SelectClip(lane);
-            else
-                SelectClip(-1);
 
             int x = e.X - HeaderW;
             if (x < 0)
@@ -898,7 +982,6 @@ namespace ProgettoBattaglino
             if (newStart < 0f)
                 newStart = 0f;
 
-            // snap leggero a 0.01 secondi
             newStart = (float)Math.Round(newStart, 2);
 
             clips[draggingClipIndex].StartSec = newStart;
@@ -939,7 +1022,7 @@ namespace ProgettoBattaglino
 
         private Rectangle GetClipRectangle(AudioClipInfo clip)
         {
-            int laneY = clip.LaneIndex * rowHeight + 8 - vScroll.Value;
+            int laneY = TrackTopPadding + clip.LaneIndex * rowHeight + 8 - vScroll.Value;
             int laneH = rowHeight - 16;
             int xStart = HeaderW + (int)(clip.StartSec * pixelsPerSecond) - timelineOffsetX;
             int clipW = Math.Max(20, (int)(clip.DurationSec * pixelsPerSecond));
@@ -949,7 +1032,11 @@ namespace ProgettoBattaglino
 
         private int GetLaneFromY(int y)
         {
-            return (y + vScroll.Value) / rowHeight;
+            int yy = y + vScroll.Value - TrackTopPadding;
+            if (yy < 0)
+                return -1;
+
+            return yy / rowHeight;
         }
 
         private void SelectClip(int index)
@@ -978,21 +1065,7 @@ namespace ProgettoBattaglino
             StopPlaybackInternal(resetToZero: false);
             timerPlay.Stop();
 
-            var clipToRemove = clips[selectedClipIndex];
-
             clips.RemoveAt(selectedClipIndex);
-
-            try
-            {
-                if (!string.IsNullOrEmpty(clipToRemove.FilePath) && File.Exists(clipToRemove.FilePath))
-                    File.Delete(clipToRemove.FilePath);
-            }
-            catch
-            {
-            }
-
-            for (int i = 0; i < clips.Count; i++)
-                clips[i].LaneIndex = i;
 
             if (clips.Count == 0)
             {
@@ -1004,6 +1077,9 @@ namespace ProgettoBattaglino
 
                 if (hScroll != null)
                     hScroll.Value = hScroll.Minimum;
+
+                if (vScroll != null)
+                    vScroll.Value = vScroll.Minimum;
             }
             else
             {
@@ -1057,18 +1133,22 @@ namespace ProgettoBattaglino
         // =========================
         private void LayoutAll()
         {
-            int totalRows = Math.Max(12, clips.Count + 1);
-            int contentHeight = rowHeight * totalRows;
-            int viewHeight = pnlTrackSurface.ClientSize.Height;
+            int maxLane = clips.Count == 0 ? 0 : clips.Max(c => c.LaneIndex);
+            int totalRows = Math.Max(7, maxLane + 2);
+            int contentHeight = TrackTopPadding + rowHeight * totalRows;
+            int viewHeight = Math.Max(1, pnlTrackSurface.ClientSize.Height);
 
             vScroll.Minimum = 0;
             vScroll.LargeChange = Math.Max(1, viewHeight);
             vScroll.Maximum = Math.Max(0, contentHeight - 1);
             vScroll.SmallChange = rowHeight;
 
+            if (vScroll.Value > vScroll.Maximum)
+                vScroll.Value = vScroll.Maximum;
+
             int totalWidth = (int)(timelineSeconds * pixelsPerSecond);
 
-            int viewWidth = pnlCenter.ClientSize.Width - vScroll.Width;
+            int viewWidth = Math.Max(1, pnlCenter.ClientSize.Width - vScroll.Width);
             hScroll.Minimum = 0;
             hScroll.LargeChange = Math.Max(1, viewWidth);
             hScroll.Maximum = Math.Max(0, totalWidth - 1);
@@ -1091,6 +1171,9 @@ namespace ProgettoBattaglino
 
             using var sepPen = new Pen(Color.FromArgb(70, 75, 90), 1);
             g.DrawLine(sepPen, HeaderW, pnlRuler.Height - 1, pnlRuler.Width, pnlRuler.Height - 1);
+
+            using var leftSepPen = new Pen(Color.FromArgb(55, 60, 70), 1);
+            g.DrawLine(leftSepPen, HeaderW, 0, HeaderW, pnlRuler.Height);
 
             using var f = new Font("Segoe UI", 9, FontStyle.Regular);
             using var br = new SolidBrush(Color.Gainsboro);
@@ -1129,35 +1212,32 @@ namespace ProgettoBattaglino
 
             int w = pnlTrackSurface.ClientSize.Width - vScroll.Width;
             int h = pnlTrackSurface.ClientSize.Height;
-            int totalRows = Math.Max(12, clips.Count + 1);
+            int maxLane = clips.Count == 0 ? 0 : clips.Max(c => c.LaneIndex);
+            int totalRows = Math.Max(7, maxLane + 2);
 
-            // Colonna sinistra tracce
             using (var headerBrush = new SolidBrush(Color.FromArgb(30, 33, 40)))
             {
                 g.FillRectangle(headerBrush, 0, 0, HeaderW, h);
             }
 
-            // Evidenzia riga selezionata
             if (selectedClipIndex >= 0 && selectedClipIndex < clips.Count)
             {
-                int selY = selectedClipIndex * rowHeight - vScroll.Value;
+                int selLane = clips[selectedClipIndex].LaneIndex;
+                int selY = TrackTopPadding + selLane * rowHeight - vScroll.Value;
                 using var selBrush = new SolidBrush(Color.FromArgb(35, 70, 110, 150));
                 g.FillRectangle(selBrush, 0, selY, w, rowHeight);
             }
 
-            // Linee orizzontali
             using var penRow = new Pen(Color.FromArgb(40, 45, 55));
             for (int i = 0; i <= totalRows; i++)
             {
-                int y = i * rowHeight - vScroll.Value;
+                int y = TrackTopPadding + i * rowHeight - vScroll.Value;
                 g.DrawLine(penRow, 0, y, w, y);
             }
 
-            // Separatore header
             using var penHeaderSep = new Pen(Color.FromArgb(55, 60, 70));
             g.DrawLine(penHeaderSep, HeaderW, 0, HeaderW, h);
 
-            // Linee verticali secondi
             using var penSec = new Pen(Color.FromArgb(35, 40, 48));
             int seconds = (int)Math.Ceiling(timelineSeconds);
 
@@ -1168,23 +1248,24 @@ namespace ProgettoBattaglino
                     g.DrawLine(penSec, x, 0, x, h);
             }
 
-            // Nomi tracce
             using var trackFont = new Font("Segoe UI", 9, FontStyle.Bold);
 
             for (int i = 0; i < totalRows; i++)
             {
-                int y = i * rowHeight - vScroll.Value;
+                int y = TrackTopPadding + i * rowHeight - vScroll.Value;
                 if (y + rowHeight < 0 || y > h) continue;
 
-                using var trackBrush = new SolidBrush(i == selectedClipIndex ? Color.White : Color.Gainsboro);
+                bool isSelectedRow = selectedClipIndex >= 0 &&
+                                     selectedClipIndex < clips.Count &&
+                                     clips[selectedClipIndex].LaneIndex == i;
+
+                using var trackBrush = new SolidBrush(isSelectedRow ? Color.White : Color.Gainsboro);
                 g.DrawString($"TRACK {i + 1}", trackFont, trackBrush, 10, y + 10);
             }
 
-            // Clip + waveform
             for (int i = 0; i < clips.Count; i++)
             {
                 var clip = clips[i];
-
                 Rectangle rect = GetClipRectangle(clip);
 
                 if (rect.Bottom < 0 || rect.Top > h)
@@ -1193,7 +1274,6 @@ namespace ProgettoBattaglino
                 DrawAudioClip(g, rect, clip, i == selectedClipIndex);
             }
 
-            // Playhead
             if (showPlayhead)
             {
                 int xPlay = HeaderW + (int)(playheadSec * pixelsPerSecond) - timelineOffsetX;
