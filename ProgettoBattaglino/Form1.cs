@@ -4,18 +4,38 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
 namespace ProgettoBattaglino
 {
+    internal class BufferedPanel : Panel
+    {
+        public BufferedPanel()
+        {
+            SetStyle(
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.UserPaint,
+                true);
+            UpdateStyles();
+        }
+    }
+
     public partial class Form1 : Form
     {
         // =========================
         //  COSTANTI / PERCORSI
         // =========================
         private const string ImportFolderPath = @"C:\Users\Luca\Desktop\scuola\PROGETTO\ProgettoBattaglino\ProgettoBattaglino\Registrazioni";
+        private static readonly string StrumentiPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Strumenti");
+
+        private const int MixerSampleRate = 44100;
+        private const int MixerChannels = 2;
+
+        private static readonly string[] NoteNames = new[] { "C5", "B4", "A#4", "A4", "G#4", "G4", "F#4", "F4", "E4", "D#4", "D4", "C#4", "C4", "B3", "A#3", "A3", "G#3", "G3", "F#3", "F3", "E3", "D#3", "D3", "C#3", "C3" };
 
         // =========================
         //  LAYOUT UI (DAW)
@@ -23,22 +43,19 @@ namespace ProgettoBattaglino
         private MenuStrip menuStripMain;
         private ToolStripMenuItem menuFile;
         private ToolStripMenuItem menuImporta;
+        private ToolStripMenuItem menuAggiungi;
 
         private Panel pnlTopBar;
         private Panel pnlCenter;
         private Panel pnlBottomMixer;
 
-        // Timeline / Tracks
-        private Panel pnlRuler;
-        private Panel pnlTrackSurface;
+        private BufferedPanel pnlRuler;
+        private BufferedPanel pnlTrackSurface;
 
         private VScrollBar vScroll;
         private HScrollBar hScroll;
-
-        // Mixer
         private FlowLayoutPanel pnlMixerTracks;
 
-        // Timeline view
         private int pixelsPerSecond = 70;
         private int timelineOffsetX = 0;
         private int rowHeight = 70;
@@ -46,26 +63,21 @@ namespace ProgettoBattaglino
         private const int TrackTopPadding = 60;
         private float timelineSeconds = 10f;
 
-        // Playhead
         private float playheadSec = 0f;
         private bool showPlayhead = false;
 
-        // Transport buttons
         private Button btnPlay;
         private Button btnStop;
         private Button btnRec;
 
         // =========================
-        //  NAudio: RECORD
+        //  NAudio: RECORD / PLAYBACK
         // =========================
         private bool isRecording = false;
         private WaveInEvent waveSource;
         private WaveFileWriter waveFile;
         private string lastRecord;
 
-        // =========================
-        //  NAudio: PLAYBACK MULTI-TRACK
-        // =========================
         private WaveOutEvent outputDevice;
         private Timer timerPlay;
         private DateTime playbackStartUtc;
@@ -79,6 +91,9 @@ namespace ProgettoBattaglino
         private int dragStartMouseX = 0;
         private float dragStartClipSec = 0f;
 
+        private bool isDraggingRightEdge = false;
+        private float dragStartDurationSec = 0f;
+
         // =========================
         //  CLIP / TRACK INFO
         // =========================
@@ -91,9 +106,17 @@ namespace ProgettoBattaglino
             public int LaneIndex { get; set; }
             public float Volume { get; set; } = 1f;
             public List<float> Peaks { get; set; } = new List<float>();
+            public bool PeaksReady { get; set; } = false;
 
-            // Reader attivo durante il playback
-            public AudioFileReader ActiveReader { get; set; }
+            public List<AudioFileReader> ActiveReaders { get; set; } = new List<AudioFileReader>();
+
+            public bool IsLoopClip { get; set; } = false;
+            public float LoopLengthSec { get; set; } = 0f;
+
+            // Proprietà per il Mini Piano Roll e lo Snap
+            public List<SequencerNote> PianoNotes { get; set; }
+            public int TotalSteps { get; set; }
+            public float StepLengthSec { get; set; } = 0f;
         }
 
         private readonly List<AudioClipInfo> clips = new List<AudioClipInfo>();
@@ -106,9 +129,6 @@ namespace ProgettoBattaglino
             LayoutAll();
         }
 
-        // =========================
-        //  BUILD UI
-        // =========================
         private void BuildUI()
         {
             Text = "ProgettoBattaglino - DAW";
@@ -120,140 +140,97 @@ namespace ProgettoBattaglino
 
             BuildMenu();
 
-            // TOP BAR
-            pnlTopBar = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = 44,
-                BackColor = Color.FromArgb(45, 49, 58)
-            };
+            pnlTopBar = new Panel { Dock = DockStyle.Top, Height = 44, BackColor = Color.FromArgb(45, 49, 58) };
             Controls.Add(pnlTopBar);
             BuildTopBar();
 
-            // BOTTOM MIXER
-            pnlBottomMixer = new Panel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 220,
-                BackColor = Color.FromArgb(35, 38, 46)
-            };
+            pnlBottomMixer = new Panel { Dock = DockStyle.Bottom, Height = 220, BackColor = Color.FromArgb(35, 38, 46) };
             Controls.Add(pnlBottomMixer);
             BuildMixer();
 
-            // CENTER
-            pnlCenter = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(28, 30, 36)
-            };
+            pnlCenter = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(28, 30, 36) };
             Controls.Add(pnlCenter);
 
-            // HSCROLL
-            hScroll = new HScrollBar
-            {
-                Dock = DockStyle.Bottom,
-                Height = 16
-            };
-            hScroll.Scroll += (s, e) =>
-            {
-                timelineOffsetX = hScroll.Value;
-                pnlRuler.Invalidate();
-                pnlTrackSurface.Invalidate();
-            };
+            hScroll = new HScrollBar { Dock = DockStyle.Bottom, Height = 16 };
+            hScroll.Scroll += (s, e) => { timelineOffsetX = hScroll.Value; pnlRuler.Invalidate(); pnlTrackSurface.Invalidate(); };
             pnlCenter.Controls.Add(hScroll);
 
-            // RULER
-            pnlRuler = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = 40,
-                BackColor = Color.FromArgb(38, 41, 50)
-            };
+            pnlRuler = new BufferedPanel { Dock = DockStyle.Top, Height = 40, BackColor = Color.FromArgb(38, 41, 50) };
             pnlRuler.Paint += PnlRuler_Paint;
             pnlRuler.MouseDown += Timeline_MouseDownSeek;
             pnlCenter.Controls.Add(pnlRuler);
 
-            // TRACK SURFACE
-            pnlTrackSurface = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(24, 26, 31),
-                TabStop = true
-            };
+            pnlTrackSurface = new BufferedPanel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(24, 26, 31), TabStop = true };
             pnlTrackSurface.Paint += PnlTrackSurface_Paint;
             pnlTrackSurface.MouseDown += Timeline_MouseDownSeek;
             pnlTrackSurface.MouseMove += PnlTrackSurface_MouseMove;
             pnlTrackSurface.MouseUp += PnlTrackSurface_MouseUp;
             pnlCenter.Controls.Add(pnlTrackSurface);
 
-            // VSCROLL
-            vScroll = new VScrollBar
-            {
-                Dock = DockStyle.Right,
-                Width = 16
-            };
+            vScroll = new VScrollBar { Dock = DockStyle.Right, Width = 16 };
             vScroll.Scroll += (s, e) => pnlTrackSurface.Invalidate();
             pnlTrackSurface.Controls.Add(vScroll);
 
-            // Timer playhead
             timerPlay = new Timer { Interval = 30 };
             timerPlay.Tick += timerPlay_Tick;
 
             Resize += (s, e) => LayoutAll();
-
             pnlRuler.BringToFront();
         }
 
         private void BuildMenu()
         {
-            menuStripMain = new MenuStrip
-            {
-                Dock = DockStyle.Top,
-                BackColor = Color.FromArgb(45, 49, 58),
-                ForeColor = Color.White
-            };
-
+            menuStripMain = new MenuStrip { Dock = DockStyle.Top, BackColor = Color.FromArgb(45, 49, 58), ForeColor = Color.White, Renderer = new DarkMenuRenderer() };
             menuFile = new ToolStripMenuItem("File");
             menuImporta = new ToolStripMenuItem("Importa");
-
-            menuImporta.Click += MenuImporta_Click;
-
+            menuImporta.Click += (s, e) => ImportAudioFile();
             menuFile.DropDownItems.Add(menuImporta);
             menuStripMain.Items.Add(menuFile);
 
+            menuAggiungi = new ToolStripMenuItem("Aggiungi");
+            menuStripMain.Items.Add(menuAggiungi);
+            RefreshAggiungiMenu();
             MainMenuStrip = menuStripMain;
             Controls.Add(menuStripMain);
         }
 
-        private void MenuImporta_Click(object sender, EventArgs e)
+        private void RefreshAggiungiMenu()
         {
-            ImportAudioFile();
+            menuAggiungi.DropDownItems.Clear();
+            if (!Directory.Exists(StrumentiPath)) { menuAggiungi.DropDownItems.Add(new ToolStripMenuItem("(nessuno strumento trovato)") { Enabled = false }); return; }
+            var dirs = Directory.GetDirectories(StrumentiPath).OrderBy(d => d).ToArray();
+            if (dirs.Length == 0) { menuAggiungi.DropDownItems.Add(new ToolStripMenuItem("(nessuno strumento trovato)") { Enabled = false }); return; }
+
+            foreach (string dir in dirs)
+            {
+                string instrumentName = Path.GetFileName(dir);
+                string samplePath = Path.Combine(dir, "C4.wav");
+                if (!File.Exists(samplePath)) continue;
+                var item = new ToolStripMenuItem(instrumentName) { Tag = instrumentName };
+                item.Click += (s, e) => OpenInstrumentForm((string)((ToolStripMenuItem)s).Tag);
+                menuAggiungi.DropDownItems.Add(item);
+            }
+            if (menuAggiungi.DropDownItems.Count == 0) menuAggiungi.DropDownItems.Add(new ToolStripMenuItem("(nessun C4.wav trovato)") { Enabled = false });
+        }
+
+        private void OpenInstrumentForm(string instrumentName)
+        {
+            string samplePath = Path.Combine(StrumentiPath, instrumentName, "C4.wav");
+            if (!File.Exists(samplePath)) { MessageBox.Show("Sample non trovato", "Errore"); return; }
+            var form = new InstrumentForm(instrumentName, samplePath);
+            form.Show(this);
         }
 
         private void BuildTopBar()
         {
-            var lblTitle = new Label
-            {
-                Text = "MyDAW - C# WinForms + NAudio",
-                ForeColor = Color.Gainsboro,
-                AutoSize = true,
-                Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                Location = new Point(12, 12)
-            };
+            var lblTitle = new Label { Text = "MyDAW - C# WinForms + NAudio", ForeColor = Color.Gainsboro, AutoSize = true, Font = new Font("Segoe UI", 10, FontStyle.Bold), Location = new Point(12, 12) };
             pnlTopBar.Controls.Add(lblTitle);
 
-            btnPlay = MakeTopButton("▶");
-            btnStop = MakeTopButton("■");
-            btnRec = MakeTopButton("●");
+            btnPlay = MakeTopButton("▶"); btnStop = MakeTopButton("■"); btnRec = MakeTopButton("●");
             btnRec.ForeColor = Color.IndianRed;
+            btnPlay.Location = new Point(300, 8); btnStop.Location = new Point(340, 8); btnRec.Location = new Point(380, 8);
 
-            btnPlay.Location = new Point(300, 8);
-            btnStop.Location = new Point(340, 8);
-            btnRec.Location = new Point(380, 8);
-
-            pnlTopBar.Controls.Add(btnPlay);
-            pnlTopBar.Controls.Add(btnStop);
-            pnlTopBar.Controls.Add(btnRec);
+            pnlTopBar.Controls.Add(btnPlay); pnlTopBar.Controls.Add(btnStop); pnlTopBar.Controls.Add(btnRec);
 
             btnPlay.Click += (s, e) => StartPlayback();
             btnStop.Click += (s, e) => StopAndReturnToStart();
@@ -262,1105 +239,526 @@ namespace ProgettoBattaglino
 
         private Button MakeTopButton(string text)
         {
-            var b = new Button
-            {
-                Text = text,
-                Width = 34,
-                Height = 28,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(55, 60, 72),
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                TabStop = false
-            };
+            var b = new Button { Text = text, Width = 34, Height = 28, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(55, 60, 72), ForeColor = Color.White, Font = new Font("Segoe UI", 10, FontStyle.Bold), TabStop = false };
             b.FlatAppearance.BorderSize = 0;
             return b;
         }
 
-        // =========================
-        //  IMPORT AUDIO
-        // =========================
         private void ImportAudioFile()
         {
-            try
+            string startDir = Directory.Exists(ImportFolderPath) ? ImportFolderPath : Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            using (var ofd = new OpenFileDialog { Title = "Importa registrazione", InitialDirectory = startDir, Filter = "File audio|*.wav;*.mp3|Tutti i file|*.*" })
             {
-                if (!Directory.Exists(ImportFolderPath))
-                {
-                    MessageBox.Show("La cartella di importazione non esiste:\n" + ImportFolderPath,
-                        "Errore",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                    return;
-                }
-
-                using (OpenFileDialog ofd = new OpenFileDialog())
-                {
-                    ofd.Title = "Importa registrazione";
-                    ofd.InitialDirectory = ImportFolderPath;
-                    ofd.Filter = "File audio|*.wav;*.mp3;*.aiff;*.wma|Tutti i file|*.*";
-                    ofd.Multiselect = false;
-                    ofd.RestoreDirectory = false;
-
-                    if (ofd.ShowDialog() != DialogResult.OK)
-                        return;
-
-                    AddImportedClipToFirstFreeTrack(ofd.FileName);
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Errore durante l'importazione:\n" + ex.Message,
-                    "Errore",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                if (ofd.ShowDialog() == DialogResult.OK) AddImportedClipToFirstFreeTrack(ofd.FileName);
             }
         }
 
         private void AddImportedClipToFirstFreeTrack(string filePath)
         {
-            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
-            {
-                MessageBox.Show("File non valido.");
-                return;
-            }
-
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return;
             float durationSec;
-            using (var reader = new AudioFileReader(filePath))
-            {
-                durationSec = (float)reader.TotalTime.TotalSeconds;
-            }
+            using (var reader = new AudioFileReader(filePath)) durationSec = (float)reader.TotalTime.TotalSeconds;
+            if (durationSec < 0.05f) durationSec = 0.05f;
 
-            if (durationSec < 0.05f)
-                durationSec = 0.05f;
+            var newClip = new AudioClipInfo { FilePath = filePath, DisplayName = Path.GetFileNameWithoutExtension(filePath), StartSec = 0f, DurationSec = durationSec, LaneIndex = GetFirstFreeLaneIndex(), Volume = 1f };
+            clips.Add(newClip);
+            selectedClipIndex = clips.IndexOf(newClip);
+            FinalizeClipAdd(newClip);
+        }
 
-            int freeLane = GetFirstFreeLaneIndex();
-
+        // =========================
+        //  AGGIUNGI MELODIA CON DATI PIANO ROLL E SNAP
+        // =========================
+        public void AddMelodyClip(string filePath, float patternDuration, List<SequencerNote> notes, int totalSteps, float stepSec)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return;
             var newClip = new AudioClipInfo
             {
                 FilePath = filePath,
-                DisplayName = Path.GetFileNameWithoutExtension(filePath),
+                DisplayName = Path.GetFileNameWithoutExtension(filePath) + " (melodia)",
                 StartSec = 0f,
-                DurationSec = durationSec,
-                LaneIndex = freeLane,
+                DurationSec = patternDuration,
+                LaneIndex = GetFirstFreeLaneIndex(),
                 Volume = 1f,
-                Peaks = BuildWaveformPeaks(filePath, 2500)
+                IsLoopClip = true,
+                LoopLengthSec = patternDuration,
+                PianoNotes = new List<SequencerNote>(notes),
+                TotalSteps = totalSteps,
+                StepLengthSec = stepSec // Cruciale per lo snap nota per nota!
             };
-
             clips.Add(newClip);
             selectedClipIndex = clips.IndexOf(newClip);
-
-            UpdateProjectLength();
-
-            playheadSec = 0f;
-            showPlayhead = false;
-            timelineOffsetX = 0;
-
-            if (hScroll != null)
-                hScroll.Value = hScroll.Minimum;
-
-            if (vScroll != null)
-                vScroll.Value = vScroll.Minimum;
-
-            RebuildMixerTracks();
-            LayoutAll();
-
-            pnlRuler.Refresh();
-            pnlTrackSurface.Refresh();
+            FinalizeClipAdd(newClip);
         }
 
-        private int GetFirstFreeLaneIndex()
+        private void FinalizeClipAdd(AudioClipInfo newClip)
         {
-            int lane = 0;
-
-            while (clips.Any(c => c.LaneIndex == lane))
-                lane++;
-
-            return lane;
+            UpdateProjectLength();
+            playheadSec = 0f; showPlayhead = false; timelineOffsetX = 0;
+            if (hScroll != null) hScroll.Value = hScroll.Minimum;
+            if (vScroll != null) vScroll.Value = vScroll.Minimum;
+            RebuildMixerTracks(); LayoutAll(); pnlRuler.Refresh(); pnlTrackSurface.Refresh();
+            if (!newClip.PeaksReady && newClip.PianoNotes == null) BuildWaveformPeaksAsync(newClip, 2500);
         }
 
-        // =========================
-        //  MIXER
-        // =========================
+        private int GetFirstFreeLaneIndex() { int lane = 0; while (clips.Any(c => c.LaneIndex == lane)) lane++; return lane; }
+
         private void BuildMixer()
         {
-            pnlMixerTracks = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                AutoScroll = true,
-                WrapContents = false,
-                FlowDirection = FlowDirection.LeftToRight,
-                Padding = new Padding(10),
-                BackColor = Color.FromArgb(35, 38, 46)
-            };
-
+            pnlMixerTracks = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(10), BackColor = Color.FromArgb(35, 38, 46) };
             pnlBottomMixer.Controls.Add(pnlMixerTracks);
-            RebuildMixerTracks();
         }
 
         private void RebuildMixerTracks()
         {
-            pnlMixerTracks.SuspendLayout();
-            pnlMixerTracks.Controls.Clear();
+            pnlMixerTracks.SuspendLayout(); pnlMixerTracks.Controls.Clear();
+            if (clips.Count == 0) { pnlMixerTracks.Controls.Add(new Label { Text = "Nessuna traccia registrata", ForeColor = Color.Gainsboro, AutoSize = true, Margin = new Padding(10) }); pnlMixerTracks.ResumeLayout(); return; }
 
-            if (clips.Count == 0)
+            foreach (var clip in clips.OrderBy(c => c.LaneIndex))
             {
-                var lblEmpty = new Label
-                {
-                    Text = "Nessuna traccia registrata",
-                    ForeColor = Color.Gainsboro,
-                    AutoSize = true,
-                    Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                    Margin = new Padding(10)
-                };
-                pnlMixerTracks.Controls.Add(lblEmpty);
-                pnlMixerTracks.ResumeLayout();
-                return;
-            }
-
-            var orderedClips = clips.OrderBy(c => c.LaneIndex).ToList();
-
-            for (int visualIndex = 0; visualIndex < orderedClips.Count; visualIndex++)
-            {
-                AudioClipInfo clip = orderedClips[visualIndex];
                 int clipIndex = clips.IndexOf(clip);
+                var strip = new Panel { Width = 120, Height = 180, BackColor = clipIndex == selectedClipIndex ? Color.FromArgb(55, 65, 95) : Color.FromArgb(30, 33, 40), Margin = new Padding(0, 0, 10, 0), Tag = clipIndex };
+                var lblTrack = new Label { Text = $"TRACK {clip.LaneIndex + 1}", ForeColor = Color.Gainsboro, AutoSize = true, Font = new Font("Segoe UI", 10, FontStyle.Bold), Location = new Point(10, 10), Tag = clipIndex };
+                var lblName = new Label { Text = clip.DisplayName, ForeColor = Color.Silver, AutoSize = false, Width = 100, Height = 30, Location = new Point(10, 32), AutoEllipsis = true, Tag = clipIndex };
+                var lblVol = new Label { Text = $"VOL: {(int)(clip.Volume * 100)}%", ForeColor = Color.Gainsboro, AutoSize = true, Location = new Point(10, 62), Tag = clipIndex };
 
-                var strip = new Panel
-                {
-                    Width = 120,
-                    Height = 180,
-                    BackColor = clipIndex == selectedClipIndex
-                        ? Color.FromArgb(55, 65, 95)
-                        : Color.FromArgb(30, 33, 40),
-                    Margin = new Padding(0, 0, 10, 0),
-                    Tag = clipIndex
-                };
+                var trk = new TrackBar { Orientation = Orientation.Vertical, Minimum = 0, Maximum = 100, Value = Math.Max(0, Math.Min(100, (int)(clip.Volume * 100))), TickStyle = TickStyle.None, Height = 100, Width = 40, Location = new Point(35, 82) };
+                trk.Scroll += (s, e) => { clip.Volume = trk.Value / 100f; lblVol.Text = $"VOL: {trk.Value}%"; foreach (var reader in clip.ActiveReaders) if (reader != null) reader.Volume = clip.Volume; };
 
-                var lblTrack = new Label
-                {
-                    Text = $"TRACK {clip.LaneIndex + 1}",
-                    ForeColor = Color.Gainsboro,
-                    AutoSize = true,
-                    Font = new Font("Segoe UI", 10, FontStyle.Bold),
-                    Location = new Point(10, 10),
-                    Tag = clipIndex
-                };
-                strip.Controls.Add(lblTrack);
-
-                var lblName = new Label
-                {
-                    Text = clip.DisplayName,
-                    ForeColor = Color.Silver,
-                    AutoSize = false,
-                    Width = 100,
-                    Height = 30,
-                    Location = new Point(10, 32),
-                    AutoEllipsis = true,
-                    Tag = clipIndex
-                };
-                strip.Controls.Add(lblName);
-
-                var lblVol = new Label
-                {
-                    Text = $"VOL: {(int)(clip.Volume * 100)}%",
-                    ForeColor = Color.Gainsboro,
-                    AutoSize = true,
-                    Location = new Point(10, 62),
-                    Tag = clipIndex
-                };
-                strip.Controls.Add(lblVol);
-
-                var trkVolume = new TrackBar
-                {
-                    Orientation = Orientation.Vertical,
-                    Minimum = 0,
-                    Maximum = 100,
-                    Value = Math.Max(0, Math.Min(100, (int)(clip.Volume * 100))),
-                    TickStyle = TickStyle.None,
-                    Height = 100,
-                    Width = 40,
-                    Location = new Point(35, 82)
-                };
-
-                trkVolume.Scroll += (s, e) =>
-                {
-                    clip.Volume = trkVolume.Value / 100f;
-                    lblVol.Text = $"VOL: {trkVolume.Value}%";
-
-                    if (clip.ActiveReader != null)
-                        clip.ActiveReader.Volume = clip.Volume;
-                };
-
-                strip.MouseDown += MixerTrack_MouseDown;
-                lblTrack.MouseDown += MixerTrack_MouseDown;
-                lblName.MouseDown += MixerTrack_MouseDown;
-                lblVol.MouseDown += MixerTrack_MouseDown;
-
-                strip.Controls.Add(trkVolume);
+                foreach (Control c in new Control[] { strip, lblTrack, lblName, lblVol }) c.MouseDown += MixerTrack_MouseDown;
+                strip.Controls.Add(lblTrack); strip.Controls.Add(lblName); strip.Controls.Add(lblVol); strip.Controls.Add(trk);
                 pnlMixerTracks.Controls.Add(strip);
             }
-
             pnlMixerTracks.ResumeLayout();
         }
 
-        private void MixerTrack_MouseDown(object sender, MouseEventArgs e)
-        {
-            if (sender is Control c && c.Tag is int idx)
-            {
-                SelectClip(idx);
-                pnlTrackSurface.Focus();
-            }
-        }
+        private void MixerTrack_MouseDown(object sender, MouseEventArgs e) { if (sender is Control c && c.Tag is int idx) { SelectClip(idx); pnlTrackSurface.Focus(); } }
 
-        // =========================
-        //  RECORD
-        // =========================
         private void ToggleRecord()
         {
-            if (!isRecording)
-            {
-                StopPlaybackInternal(resetToZero: true);
-                StartRecording();
-            }
-            else
-            {
-                StopRecording();
-            }
+            if (!isRecording) { StopPlaybackInternal(true); StartRecording(); } else StopRecording();
         }
 
         private void StartRecording()
         {
-            string recDir = ImportFolderPath;
-            Directory.CreateDirectory(recDir);
-
-            string fileName = "Rec_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".wav";
-            lastRecord = Path.Combine(recDir, fileName);
-
-            waveSource = new WaveInEvent();
-            waveSource.WaveFormat = new WaveFormat(44100, 1);
-
+            Directory.CreateDirectory(ImportFolderPath);
+            lastRecord = Path.Combine(ImportFolderPath, "Rec_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".wav");
+            waveSource = new WaveInEvent { WaveFormat = new WaveFormat(44100, 1) };
             waveSource.DataAvailable += WaveSource_DataAvailable;
             waveSource.RecordingStopped += WaveSource_RecordingStopped;
-
             waveFile = new WaveFileWriter(lastRecord, waveSource.WaveFormat);
 
-            isRecording = true;
-            btnRec.BackColor = Color.FromArgb(120, 40, 40);
-
-            showPlayhead = false;
-            playheadSec = 0f;
-            timelineOffsetX = 0;
-
-            if (hScroll != null)
-                hScroll.Value = hScroll.Minimum;
-
-            waveSource.StartRecording();
-
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            isRecording = true; btnRec.BackColor = Color.FromArgb(120, 40, 40);
+            showPlayhead = false; playheadSec = 0f; timelineOffsetX = 0;
+            if (hScroll != null) hScroll.Value = hScroll.Minimum;
+            waveSource.StartRecording(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
-        private void StopRecording()
-        {
-            if (!isRecording) return;
-
-            isRecording = false;
-
-            try
-            {
-                waveSource?.StopRecording();
-            }
-            catch
-            {
-            }
-
-            btnRec.BackColor = Color.FromArgb(55, 60, 72);
-        }
-
-        private void WaveSource_DataAvailable(object sender, WaveInEventArgs e)
-        {
-            waveFile?.Write(e.Buffer, 0, e.BytesRecorded);
-            waveFile?.Flush();
-        }
+        private void StopRecording() { if (!isRecording) return; isRecording = false; try { waveSource?.StopRecording(); } catch { } btnRec.BackColor = Color.FromArgb(55, 60, 72); }
+        private void WaveSource_DataAvailable(object sender, WaveInEventArgs e) { waveFile?.Write(e.Buffer, 0, e.BytesRecorded); waveFile?.Flush(); }
 
         private void WaveSource_RecordingStopped(object sender, StoppedEventArgs e)
         {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() => WaveSource_RecordingStopped(sender, e)));
-                return;
-            }
-
-            waveFile?.Dispose();
-            waveFile = null;
-
-            waveSource?.Dispose();
-            waveSource = null;
-
-            if (!string.IsNullOrEmpty(lastRecord) && File.Exists(lastRecord))
-            {
-                float durationSec;
-
-                using (var r = new AudioFileReader(lastRecord))
-                {
-                    durationSec = (float)r.TotalTime.TotalSeconds;
-                }
-
-                if (durationSec < 0.05f)
-                    durationSec = 0.05f;
-
-                var newClip = new AudioClipInfo
-                {
-                    FilePath = lastRecord,
-                    DisplayName = Path.GetFileNameWithoutExtension(lastRecord),
-                    StartSec = 0f,
-                    DurationSec = durationSec,
-                    LaneIndex = GetFirstFreeLaneIndex(),
-                    Volume = 1f,
-                    Peaks = BuildWaveformPeaks(lastRecord, 2500)
-                };
-
-                clips.Add(newClip);
-                selectedClipIndex = clips.IndexOf(newClip);
-
-                UpdateProjectLength();
-
-                playheadSec = 0f;
-                showPlayhead = false;
-                timelineOffsetX = 0;
-
-                if (hScroll != null)
-                    hScroll.Value = hScroll.Minimum;
-
-                if (vScroll != null)
-                    vScroll.Value = vScroll.Minimum;
-
-                RebuildMixerTracks();
-                LayoutAll();
-
-                pnlRuler.Refresh();
-                pnlTrackSurface.Refresh();
-            }
+            if (InvokeRequired) { BeginInvoke(new Action(() => WaveSource_RecordingStopped(sender, e))); return; }
+            waveFile?.Dispose(); waveFile = null; waveSource?.Dispose(); waveSource = null;
+            if (!string.IsNullOrEmpty(lastRecord) && File.Exists(lastRecord)) AddImportedClipToFirstFreeTrack(lastRecord);
         }
 
-        // =========================
-        //  COSTRUZIONE WAVEFORM
-        // =========================
+        private void BuildWaveformPeaksAsync(AudioClipInfo clip, int maxPeaks)
+        {
+            string fp = clip.FilePath;
+            Task.Run(() => { var peaks = BuildWaveformPeaks(fp, maxPeaks); if (IsHandleCreated) BeginInvoke(new Action(() => { clip.Peaks = peaks; clip.PeaksReady = true; pnlTrackSurface.Invalidate(); })); });
+        }
+
         private List<float> BuildWaveformPeaks(string filePath, int maxPeaks)
         {
             var peaks = new List<float>();
-
-            using (var reader = new AudioFileReader(filePath))
+            try
             {
-                int channels = reader.WaveFormat.Channels;
-                int sampleRate = reader.WaveFormat.SampleRate;
-
-                long totalFrames = (long)(reader.TotalTime.TotalSeconds * sampleRate);
-                int samplesPerPeak = (int)Math.Max(1, totalFrames / Math.Max(1, maxPeaks));
-
-                float[] buffer = new float[8192 * channels];
-                int read;
-
-                int frameCounter = 0;
-                float currentPeak = 0f;
-
-                while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
+                using (var reader = new AudioFileReader(filePath))
                 {
-                    for (int i = 0; i < read; i += channels)
+                    int ch = reader.WaveFormat.Channels;
+                    long tot = (long)(reader.TotalTime.TotalSeconds * reader.WaveFormat.SampleRate);
+                    int spp = (int)Math.Max(1, tot / Math.Max(1, maxPeaks));
+                    float[] buf = new float[8192 * ch];
+                    int read; int fc = 0; float cp = 0f;
+
+                    while ((read = reader.Read(buf, 0, buf.Length)) > 0)
                     {
-                        float sampleAbs = 0f;
-
-                        for (int ch = 0; ch < channels; ch++)
+                        for (int i = 0; i < read; i += ch)
                         {
-                            float s = Math.Abs(buffer[i + ch]);
-                            if (s > sampleAbs)
-                                sampleAbs = s;
-                        }
-
-                        if (sampleAbs > currentPeak)
-                            currentPeak = sampleAbs;
-
-                        frameCounter++;
-
-                        if (frameCounter >= samplesPerPeak)
-                        {
-                            peaks.Add(Math.Min(1f, currentPeak));
-                            currentPeak = 0f;
-                            frameCounter = 0;
+                            float sa = 0f;
+                            for (int c2 = 0; c2 < ch && (i + c2) < read; c2++) { float s = Math.Abs(buf[i + c2]); if (s > sa) sa = s; }
+                            if (sa > cp) cp = sa;
+                            if (++fc >= spp) { peaks.Add(Math.Min(1f, cp)); cp = 0f; fc = 0; }
                         }
                     }
+                    if (fc > 0) peaks.Add(Math.Min(1f, cp));
                 }
-
-                if (frameCounter > 0)
-                    peaks.Add(Math.Min(1f, currentPeak));
             }
-
-            if (peaks.Count == 0)
-                peaks.Add(0f);
-
+            catch { }
+            if (peaks.Count == 0) peaks.Add(0f);
             return peaks;
         }
 
-        // =========================
-        //  PLAYBACK MULTI-TRACK
-        // =========================
+        private ISampleProvider ConvertToMixerFormat(ISampleProvider input)
+        {
+            if (input.WaveFormat.Channels == 1 && MixerChannels == 2) input = new MonoToStereoSampleProvider(input);
+            if (input.WaveFormat.SampleRate != MixerSampleRate) input = new WdlResamplingSampleProvider(input, MixerSampleRate);
+            return input;
+        }
+
         private void StartPlayback()
         {
-            if (clips.Count == 0)
-            {
-                MessageBox.Show("Nessuna traccia registrata.");
-                return;
-            }
-
-            if (isRecording)
-                StopRecording();
-
-            StopPlaybackInternal(resetToZero: false);
+            if (clips.Count == 0) return;
+            if (isRecording) StopRecording();
+            StopPlaybackInternal(false);
 
             float projectEnd = GetProjectEndSec();
-
-            if (playheadSec >= projectEnd)
-            {
-                playheadSec = 0f;
-                timelineOffsetX = 0;
-                if (hScroll != null)
-                    hScroll.Value = hScroll.Minimum;
-            }
+            if (playheadSec >= projectEnd) { playheadSec = 0f; timelineOffsetX = 0; if (hScroll != null) hScroll.Value = hScroll.Minimum; }
 
             var mixerInputs = new List<ISampleProvider>();
-
-            foreach (var clip in clips)
+            try
             {
-                if (!File.Exists(clip.FilePath))
-                    continue;
-
-                var reader = new AudioFileReader(clip.FilePath);
-                reader.Volume = clip.Volume;
-                clip.ActiveReader = reader;
-
-                float clipEnd = clip.StartSec + clip.DurationSec;
-
-                if (playheadSec >= clipEnd)
+                foreach (var clip in clips)
                 {
-                    reader.Dispose();
-                    clip.ActiveReader = null;
-                    continue;
-                }
+                    if (!File.Exists(clip.FilePath)) continue;
+                    clip.ActiveReaders.Clear();
 
-                if (playheadSec < clip.StartSec)
-                {
-                    var delayedProvider = new OffsetSampleProvider(reader)
+                    float clipEnd = clip.StartSec + clip.DurationSec;
+                    if (playheadSec >= clipEnd) continue;
+
+                    if (clip.IsLoopClip && clip.LoopLengthSec > 0)
                     {
-                        DelayBy = TimeSpan.FromSeconds(clip.StartSec - playheadSec)
-                    };
+                        float pattern = clip.LoopLengthSec;
+                        float currentLoopStart = clip.StartSec;
 
-                    mixerInputs.Add(delayedProvider);
+                        while (currentLoopStart < clipEnd)
+                        {
+                            float loopEnd = Math.Min(currentLoopStart + pattern, clipEnd);
+                            if (loopEnd <= playheadSec) { currentLoopStart += pattern; continue; }
+
+                            float delayFromNow = currentLoopStart - playheadSec;
+                            float skipInFile = 0f;
+                            if (delayFromNow < 0) { skipInFile = -delayFromNow; delayFromNow = 0f; }
+
+                            float durationToPlay = loopEnd - Math.Max(playheadSec, currentLoopStart);
+
+                            var reader = new AudioFileReader(clip.FilePath) { Volume = clip.Volume };
+                            reader.CurrentTime = TimeSpan.FromSeconds(skipInFile);
+                            clip.ActiveReaders.Add(reader);
+
+                            var offset = new OffsetSampleProvider(ConvertToMixerFormat(reader))
+                            {
+                                Take = TimeSpan.FromSeconds(durationToPlay),
+                                DelayBy = TimeSpan.FromSeconds(delayFromNow)
+                            };
+                            mixerInputs.Add(offset);
+
+                            currentLoopStart += pattern;
+                        }
+                        continue;
+                    }
+
+                    // Clip Normale
+                    var normalReader = new AudioFileReader(clip.FilePath) { Volume = clip.Volume };
+                    clip.ActiveReaders.Add(normalReader);
+
+                    float ls = playheadSec - clip.StartSec;
+                    if (ls > 0)
+                    {
+                        normalReader.CurrentTime = TimeSpan.FromSeconds(ls);
+                        var offset = new OffsetSampleProvider(ConvertToMixerFormat(normalReader))
+                        {
+                            Take = TimeSpan.FromSeconds(clip.DurationSec - ls)
+                        };
+                        mixerInputs.Add(offset);
+                    }
+                    else
+                    {
+                        var offset = new OffsetSampleProvider(ConvertToMixerFormat(normalReader))
+                        {
+                            DelayBy = TimeSpan.FromSeconds(-ls),
+                            Take = TimeSpan.FromSeconds(clip.DurationSec)
+                        };
+                        mixerInputs.Add(offset);
+                    }
                 }
-                else
-                {
-                    float localStart = playheadSec - clip.StartSec;
-                    if (localStart < 0f)
-                        localStart = 0f;
 
-                    reader.CurrentTime = TimeSpan.FromSeconds(localStart);
-                    mixerInputs.Add(reader);
-                }
+                if (mixerInputs.Count == 0) { DisposePlaybackResources(false); return; }
+
+                outputDevice = new WaveOutEvent();
+                outputDevice.Init(new MixingSampleProvider(mixerInputs) { ReadFully = false });
+                outputDevice.PlaybackStopped += OutputDevice_PlaybackStopped;
+                playbackStartSec = playheadSec;
+                playbackStartUtc = DateTime.UtcNow;
+                outputDevice.Play();
+                showPlayhead = true;
+                timerPlay.Start();
+                LayoutAll(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
             }
-
-            if (mixerInputs.Count == 0)
-            {
-                DisposePlaybackResources(resetToZero: false);
-                return;
-            }
-
-            var mixer = new MixingSampleProvider(mixerInputs)
-            {
-                ReadFully = false
-            };
-
-            outputDevice = new WaveOutEvent();
-            outputDevice.Init(mixer);
-            outputDevice.PlaybackStopped += OutputDevice_PlaybackStopped;
-
-            playbackStartSec = playheadSec;
-            playbackStartUtc = DateTime.UtcNow;
-
-            outputDevice.Play();
-
-            showPlayhead = true;
-            timerPlay.Start();
-
-            LayoutAll();
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            catch (Exception ex) { timerPlay.Stop(); DisposePlaybackResources(false); MessageBox.Show("Errore playback:\n" + ex.Message, "Errore"); }
         }
 
         private void OutputDevice_PlaybackStopped(object sender, StoppedEventArgs e)
         {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() => OutputDevice_PlaybackStopped(sender, e)));
-                return;
-            }
-
+            if (InvokeRequired) { BeginInvoke(new Action(() => OutputDevice_PlaybackStopped(sender, e))); return; }
             timerPlay.Stop();
-
-            playheadSec = Math.Min(GetProjectEndSec(),
-                playbackStartSec + (float)(DateTime.UtcNow - playbackStartUtc).TotalSeconds);
-
-            DisposePlaybackResources(resetToZero: false);
-
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            playheadSec = Math.Min(GetProjectEndSec(), playbackStartSec + (float)(DateTime.UtcNow - playbackStartUtc).TotalSeconds);
+            DisposePlaybackResources(false);
+            pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
-        private void StopAndReturnToStart()
-        {
-            timerPlay.Stop();
-            StopPlaybackInternal(resetToZero: true);
-
-            playheadSec = 0f;
-            showPlayhead = false;
-
-            timelineOffsetX = 0;
-            if (hScroll != null)
-                hScroll.Value = hScroll.Minimum;
-
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
-        }
-
-        private void StopPlaybackInternal(bool resetToZero)
-        {
-            if (outputDevice != null)
-            {
-                outputDevice.PlaybackStopped -= OutputDevice_PlaybackStopped;
-
-                try
-                {
-                    if (outputDevice.PlaybackState != PlaybackState.Stopped)
-                        outputDevice.Stop();
-                }
-                catch
-                {
-                }
-            }
-
-            DisposePlaybackResources(resetToZero);
-        }
+        private void StopAndReturnToStart() { timerPlay.Stop(); StopPlaybackInternal(true); playheadSec = 0f; showPlayhead = false; timelineOffsetX = 0; if (hScroll != null) hScroll.Value = hScroll.Minimum; pnlRuler.Invalidate(); pnlTrackSurface.Invalidate(); }
+        private void StopPlaybackInternal(bool resetToZero) { if (outputDevice != null) { outputDevice.PlaybackStopped -= OutputDevice_PlaybackStopped; try { if (outputDevice.PlaybackState != PlaybackState.Stopped) outputDevice.Stop(); } catch { } } DisposePlaybackResources(resetToZero); }
 
         private void DisposePlaybackResources(bool resetToZero)
         {
-            outputDevice?.Dispose();
-            outputDevice = null;
-
-            foreach (var clip in clips)
-            {
-                clip.ActiveReader?.Dispose();
-                clip.ActiveReader = null;
-            }
-
-            if (resetToZero)
-                playheadSec = 0f;
+            outputDevice?.Dispose(); outputDevice = null;
+            foreach (var clip in clips) { foreach (var reader in clip.ActiveReaders) reader?.Dispose(); clip.ActiveReaders.Clear(); }
+            if (resetToZero) playheadSec = 0f;
         }
 
-        private float GetProjectEndSec()
-        {
-            if (clips.Count == 0)
-                return 0f;
+        private float GetProjectEndSec() => clips.Count == 0 ? 0f : clips.Max(c => c.StartSec + c.DurationSec);
+        private void UpdateProjectLength() { timelineSeconds = clips.Count == 0 ? 10f : Math.Max(10f, GetProjectEndSec()); }
 
-            return clips.Max(c => c.StartSec + c.DurationSec);
-        }
-
-        private void UpdateProjectLength()
-        {
-            if (clips.Count == 0)
-                timelineSeconds = 10f;
-            else
-                timelineSeconds = Math.Max(10f, clips.Max(c => c.StartSec + c.DurationSec));
-        }
-
-        // =========================
-        //  TIMER
-        // =========================
         private void timerPlay_Tick(object sender, EventArgs e)
         {
-            if (outputDevice == null) return;
-            if (outputDevice.PlaybackState != PlaybackState.Playing) return;
-
+            if (outputDevice == null || outputDevice.PlaybackState != PlaybackState.Playing) return;
             playheadSec = playbackStartSec + (float)(DateTime.UtcNow - playbackStartUtc).TotalSeconds;
-
-            float projectEnd = GetProjectEndSec();
-            if (playheadSec > projectEnd)
-                playheadSec = projectEnd;
-
+            float pe = GetProjectEndSec(); if (playheadSec > pe) playheadSec = pe;
             showPlayhead = true;
-
             AutoScrollToPlayhead();
-
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
-        // =========================
-        //  SEEK + SELEZIONE + DRAG
-        // =========================
         private void Timeline_MouseDownSeek(object sender, MouseEventArgs e)
         {
             pnlTrackSurface.Focus();
 
             if (sender == pnlTrackSurface)
             {
-                int hitClipIndex = HitTestClip(e.Location);
-
-                if (e.Button == MouseButtons.Left && hitClipIndex >= 0)
+                int hit = HitTestClip(e.Location);
+                if (hit >= 0)
                 {
-                    SelectClip(hitClipIndex);
+                    SelectClip(hit);
+                    var rect = GetClipRectangle(clips[hit]);
+
+                    const int edgeTolerance = 8;
+                    if (e.X >= rect.Right - edgeTolerance && e.X <= rect.Right + edgeTolerance)
+                    {
+                        isDraggingRightEdge = true; draggingClipIndex = hit; dragStartMouseX = e.X; dragStartDurationSec = clips[hit].DurationSec;
+                        pnlTrackSurface.Capture = true; pnlTrackSurface.Cursor = Cursors.SizeWE;
+                        return;
+                    }
 
                     if (!isRecording && (outputDevice == null || outputDevice.PlaybackState != PlaybackState.Playing))
                     {
-                        isDraggingClip = true;
-                        draggingClipIndex = hitClipIndex;
-                        dragStartMouseX = e.X;
-                        dragStartClipSec = clips[hitClipIndex].StartSec;
-                        pnlTrackSurface.Capture = true;
-                        pnlTrackSurface.Cursor = Cursors.SizeWE;
+                        isDraggingClip = true; draggingClipIndex = hit; dragStartMouseX = e.X; dragStartClipSec = clips[hit].StartSec;
+                        pnlTrackSurface.Capture = true; pnlTrackSurface.Cursor = Cursors.SizeWE;
                     }
-
                     return;
                 }
-
-                int lane = GetLaneFromY(e.Y);
-                if (lane >= 0)
-                {
-                    int clipInLane = clips.FindIndex(c => c.LaneIndex == lane);
-                    SelectClip(clipInLane);
-                }
-                else
-                {
-                    SelectClip(-1);
-                }
+                int lane = GetLaneFromY(e.Y); SelectClip(lane >= 0 ? clips.FindIndex(c => c.LaneIndex == lane) : -1);
             }
 
-            int x = e.X - HeaderW;
-            if (x < 0)
-            {
-                pnlTrackSurface.Invalidate();
-                return;
-            }
-
-            int xTimeline = x + timelineOffsetX;
-            float sec = xTimeline / (float)pixelsPerSecond;
-
-            if (sec < 0) sec = 0;
-            if (sec > timelineSeconds) sec = timelineSeconds;
-
-            playheadSec = sec;
-            showPlayhead = true;
-
-            bool wasPlaying = outputDevice != null && outputDevice.PlaybackState == PlaybackState.Playing;
-
-            if (wasPlaying)
-            {
-                StartPlayback();
-                return;
-            }
-
-            AutoScrollToPlayhead();
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            int x = e.X - HeaderW; if (x < 0) { pnlTrackSurface.Invalidate(); return; }
+            float sec = (x + timelineOffsetX) / (float)pixelsPerSecond;
+            playheadSec = Math.Max(0, Math.Min(sec, timelineSeconds)); showPlayhead = true;
+            if (outputDevice != null && outputDevice.PlaybackState == PlaybackState.Playing) { StartPlayback(); return; }
+            AutoScrollToPlayhead(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
         private void PnlTrackSurface_MouseMove(object sender, MouseEventArgs e)
         {
-            if (!isDraggingClip || draggingClipIndex < 0 || draggingClipIndex >= clips.Count)
+            if (isDraggingRightEdge && draggingClipIndex >= 0)
+            {
+                float deltaSec = (e.X - dragStartMouseX) / (float)pixelsPerSecond;
+                float newDur = dragStartDurationSec + deltaSec;
+                if (newDur < 0.1f) newDur = 0.1f;
+
+                var clip = clips[draggingClipIndex];
+
+                // === SNAP "NOTA PER NOTA" ===
+                if (clip.IsLoopClip && clip.StepLengthSec > 0)
+                {
+                    newDur = (float)Math.Round(newDur / clip.StepLengthSec) * clip.StepLengthSec;
+                    if (newDur < clip.StepLengthSec) newDur = clip.StepLengthSec;
+                }
+
+                clip.DurationSec = newDur;
+                UpdateProjectLength(); LayoutAll(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
                 return;
+            }
 
-            int deltaX = e.X - dragStartMouseX;
-            float deltaSec = deltaX / (float)pixelsPerSecond;
-
-            float newStart = dragStartClipSec + deltaSec;
-            if (newStart < 0f)
-                newStart = 0f;
-
-            newStart = (float)Math.Round(newStart, 2);
-
-            clips[draggingClipIndex].StartSec = newStart;
-
-            UpdateProjectLength();
-            LayoutAll();
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            if (!isDraggingClip || draggingClipIndex < 0 || draggingClipIndex >= clips.Count) return;
+            clips[draggingClipIndex].StartSec = (float)Math.Round(Math.Max(0f, dragStartClipSec + (e.X - dragStartMouseX) / (float)pixelsPerSecond), 2);
+            UpdateProjectLength(); LayoutAll(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
         private void PnlTrackSurface_MouseUp(object sender, MouseEventArgs e)
         {
-            if (!isDraggingClip)
-                return;
-
-            isDraggingClip = false;
-            draggingClipIndex = -1;
-            pnlTrackSurface.Capture = false;
-            pnlTrackSurface.Cursor = Cursors.Default;
-
-            UpdateProjectLength();
-            LayoutAll();
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            if (isDraggingRightEdge) { isDraggingRightEdge = false; draggingClipIndex = -1; pnlTrackSurface.Capture = false; pnlTrackSurface.Cursor = Cursors.Default; UpdateProjectLength(); LayoutAll(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate(); return; }
+            if (!isDraggingClip) return;
+            isDraggingClip = false; draggingClipIndex = -1; pnlTrackSurface.Capture = false; pnlTrackSurface.Cursor = Cursors.Default;
+            UpdateProjectLength(); LayoutAll(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
-        private int HitTestClip(Point p)
-        {
-            for (int i = clips.Count - 1; i >= 0; i--)
-            {
-                Rectangle rect = GetClipRectangle(clips[i]);
-                if (rect.Contains(p))
-                    return i;
-            }
-
-            return -1;
-        }
-
-        private Rectangle GetClipRectangle(AudioClipInfo clip)
-        {
-            int laneY = TrackTopPadding + clip.LaneIndex * rowHeight + 8 - vScroll.Value;
-            int laneH = rowHeight - 16;
-            int xStart = HeaderW + (int)(clip.StartSec * pixelsPerSecond) - timelineOffsetX;
-            int clipW = Math.Max(20, (int)(clip.DurationSec * pixelsPerSecond));
-
-            return new Rectangle(xStart, laneY, clipW, laneH);
-        }
-
-        private int GetLaneFromY(int y)
-        {
-            int yy = y + vScroll.Value - TrackTopPadding;
-            if (yy < 0)
-                return -1;
-
-            return yy / rowHeight;
-        }
-
-        private void SelectClip(int index)
-        {
-            selectedClipIndex = index;
-            RebuildMixerTracks();
-            pnlTrackSurface.Invalidate();
-            pnlRuler.Invalidate();
-        }
-
-        private void Form1_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Delete)
-            {
-                DeleteSelectedClip();
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-            }
-        }
+        private int HitTestClip(Point p) { for (int i = clips.Count - 1; i >= 0; i--) if (GetClipRectangle(clips[i]).Contains(p)) return i; return -1; }
+        private Rectangle GetClipRectangle(AudioClipInfo clip) { return new Rectangle(HeaderW + (int)(clip.StartSec * pixelsPerSecond) - timelineOffsetX, TrackTopPadding + clip.LaneIndex * rowHeight + 8 - vScroll.Value, Math.Max(20, (int)(clip.DurationSec * pixelsPerSecond)), rowHeight - 16); }
+        private int GetLaneFromY(int y) { int yy = y + vScroll.Value - TrackTopPadding; return yy < 0 ? -1 : yy / rowHeight; }
+        private void SelectClip(int index) { selectedClipIndex = index; RebuildMixerTracks(); pnlTrackSurface.Invalidate(); pnlRuler.Invalidate(); }
+        private void Form1_KeyDown(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Delete) { DeleteSelectedClip(); e.Handled = true; e.SuppressKeyPress = true; } }
 
         private void DeleteSelectedClip()
         {
-            if (selectedClipIndex < 0 || selectedClipIndex >= clips.Count)
-                return;
-
-            StopPlaybackInternal(resetToZero: false);
-            timerPlay.Stop();
-
-            clips.RemoveAt(selectedClipIndex);
-
-            if (clips.Count == 0)
-            {
-                selectedClipIndex = -1;
-                playheadSec = 0f;
-                showPlayhead = false;
-                timelineSeconds = 10f;
-                timelineOffsetX = 0;
-
-                if (hScroll != null)
-                    hScroll.Value = hScroll.Minimum;
-
-                if (vScroll != null)
-                    vScroll.Value = vScroll.Minimum;
-            }
-            else
-            {
-                if (selectedClipIndex >= clips.Count)
-                    selectedClipIndex = clips.Count - 1;
-
-                UpdateProjectLength();
-
-                float projectEnd = GetProjectEndSec();
-                if (playheadSec > projectEnd)
-                    playheadSec = projectEnd;
-            }
-
-            RebuildMixerTracks();
-            LayoutAll();
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            if (selectedClipIndex < 0 || selectedClipIndex >= clips.Count) return;
+            StopPlaybackInternal(false); timerPlay.Stop(); clips.RemoveAt(selectedClipIndex);
+            if (clips.Count == 0) { selectedClipIndex = -1; playheadSec = 0f; showPlayhead = false; timelineSeconds = 10f; timelineOffsetX = 0; if (hScroll != null) hScroll.Value = hScroll.Minimum; if (vScroll != null) vScroll.Value = vScroll.Minimum; }
+            else { if (selectedClipIndex >= clips.Count) selectedClipIndex = clips.Count - 1; UpdateProjectLength(); float pe = GetProjectEndSec(); if (playheadSec > pe) playheadSec = pe; }
+            RebuildMixerTracks(); LayoutAll(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
-        // =========================
-        //  AUTO-SCROLL
-        // =========================
         private void AutoScrollToPlayhead()
         {
-            int viewW = Math.Max(1, pnlCenter.ClientSize.Width - vScroll.Width);
-            int timelineViewW = Math.Max(1, viewW - HeaderW);
-
-            int playPx = (int)(playheadSec * pixelsPerSecond);
-            int xOnScreen = HeaderW + playPx - timelineOffsetX;
-
-            int rightLimit = HeaderW + timelineViewW - 20;
-
-            if (xOnScreen > rightLimit)
-            {
-                int newOffset = playPx - (timelineViewW - 20);
-                newOffset = Math.Max(0, newOffset);
-
-                if (newOffset > hScroll.Maximum)
-                    newOffset = hScroll.Maximum;
-
-                if (hScroll.Value != newOffset)
-                {
-                    hScroll.Value = newOffset;
-                    timelineOffsetX = newOffset;
-                }
-            }
+            int tvW = Math.Max(1, pnlCenter.ClientSize.Width - vScroll.Width - HeaderW);
+            int ppx = (int)(playheadSec * pixelsPerSecond); int xOS = HeaderW + ppx - timelineOffsetX;
+            if (xOS > HeaderW + tvW - 20) { int no = Math.Max(0, Math.Min(ppx - (tvW - 20), hScroll.Maximum)); if (hScroll.Value != no) { hScroll.Value = no; timelineOffsetX = no; } }
         }
 
-        // =========================
-        //  LAYOUT SCROLL
-        // =========================
         private void LayoutAll()
         {
             int maxLane = clips.Count == 0 ? 0 : clips.Max(c => c.LaneIndex);
-            int totalRows = Math.Max(7, maxLane + 2);
-            int contentHeight = TrackTopPadding + rowHeight * totalRows;
-            int viewHeight = Math.Max(1, pnlTrackSurface.ClientSize.Height);
+            int contentH = TrackTopPadding + rowHeight * Math.Max(7, maxLane + 2);
+            vScroll.Minimum = 0; vScroll.LargeChange = Math.Max(1, pnlTrackSurface.ClientSize.Height); vScroll.Maximum = Math.Max(0, contentH - 1); vScroll.SmallChange = rowHeight;
+            if (vScroll.Value > vScroll.Maximum) vScroll.Value = vScroll.Maximum;
 
-            vScroll.Minimum = 0;
-            vScroll.LargeChange = Math.Max(1, viewHeight);
-            vScroll.Maximum = Math.Max(0, contentHeight - 1);
-            vScroll.SmallChange = rowHeight;
+            int totalW = (int)(timelineSeconds * pixelsPerSecond);
+            hScroll.Minimum = 0; hScroll.LargeChange = Math.Max(1, pnlCenter.ClientSize.Width - vScroll.Width); hScroll.Maximum = Math.Max(0, totalW - 1);
+            if (hScroll.Value > hScroll.Maximum) hScroll.Value = hScroll.Maximum;
 
-            if (vScroll.Value > vScroll.Maximum)
-                vScroll.Value = vScroll.Maximum;
-
-            int totalWidth = (int)(timelineSeconds * pixelsPerSecond);
-
-            int viewWidth = Math.Max(1, pnlCenter.ClientSize.Width - vScroll.Width);
-            hScroll.Minimum = 0;
-            hScroll.LargeChange = Math.Max(1, viewWidth);
-            hScroll.Maximum = Math.Max(0, totalWidth - 1);
-
-            if (hScroll.Value > hScroll.Maximum)
-                hScroll.Value = hScroll.Maximum;
-
-            pnlRuler.Invalidate();
-            pnlTrackSurface.Invalidate();
+            pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
-        // =========================
-        //  DRAW RULER
-        // =========================
         private void PnlRuler_Paint(object sender, PaintEventArgs e)
         {
-            var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.FromArgb(38, 41, 50));
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.Clear(Color.FromArgb(38, 41, 50));
+            using (var p1 = new Pen(Color.FromArgb(70, 75, 90))) g.DrawLine(p1, HeaderW, pnlRuler.Height - 1, pnlRuler.Width, pnlRuler.Height - 1);
+            using (var p2 = new Pen(Color.FromArgb(55, 60, 70))) g.DrawLine(p2, HeaderW, 0, HeaderW, pnlRuler.Height);
+            using var f = new Font("Segoe UI", 9, FontStyle.Regular); using var br = new SolidBrush(Color.Gainsboro);
 
-            using var sepPen = new Pen(Color.FromArgb(70, 75, 90), 1);
-            g.DrawLine(sepPen, HeaderW, pnlRuler.Height - 1, pnlRuler.Width, pnlRuler.Height - 1);
-
-            using var leftSepPen = new Pen(Color.FromArgb(55, 60, 70), 1);
-            g.DrawLine(leftSepPen, HeaderW, 0, HeaderW, pnlRuler.Height);
-
-            using var f = new Font("Segoe UI", 9, FontStyle.Regular);
-            using var br = new SolidBrush(Color.Gainsboro);
-
-            int startX = HeaderW - timelineOffsetX;
-            int seconds = (int)Math.Ceiling(timelineSeconds);
-
-            for (int s = 0; s <= seconds; s++)
+            int startX = HeaderW - timelineOffsetX; int secs = (int)Math.Ceiling(timelineSeconds);
+            for (int s = 0; s <= secs; s++)
             {
                 int x = startX + s * pixelsPerSecond;
-
-                if (x < HeaderW) continue;
-                if (x > pnlRuler.Width) break;
-
+                if (x < HeaderW) continue; if (x > pnlRuler.Width) break;
                 g.DrawLine(Pens.Gray, x, 6, x, pnlRuler.Height - 6);
-
-                if (s % 2 == 0)
-                    g.DrawString(s.ToString(), f, br, x + 3, 10);
+                if (s % 2 == 0) g.DrawString(s.ToString(), f, br, x + 3, 10);
             }
-
-            if (showPlayhead)
-            {
-                int xPlay = HeaderW + (int)(playheadSec * pixelsPerSecond) - timelineOffsetX;
-                using var playPen = new Pen(Color.WhiteSmoke, 2);
-                g.DrawLine(playPen, xPlay, 0, xPlay, pnlRuler.Height);
-            }
+            if (showPlayhead) { int xp = HeaderW + (int)(playheadSec * pixelsPerSecond) - timelineOffsetX; using var pp = new Pen(Color.WhiteSmoke, 2); g.DrawLine(pp, xp, 0, xp, pnlRuler.Height); }
         }
 
-        // =========================
-        //  DRAW TRACKS + WAVEFORM
-        // =========================
         private void PnlTrackSurface_Paint(object sender, PaintEventArgs e)
         {
-            var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            int w = pnlTrackSurface.ClientSize.Width - vScroll.Width; int h = pnlTrackSurface.ClientSize.Height;
+            int totalRows = Math.Max(7, clips.Count == 0 ? 2 : clips.Max(c => c.LaneIndex) + 2);
 
-            int w = pnlTrackSurface.ClientSize.Width - vScroll.Width;
-            int h = pnlTrackSurface.ClientSize.Height;
-            int maxLane = clips.Count == 0 ? 0 : clips.Max(c => c.LaneIndex);
-            int totalRows = Math.Max(7, maxLane + 2);
+            using (var hb = new SolidBrush(Color.FromArgb(30, 33, 40))) g.FillRectangle(hb, 0, 0, HeaderW, h);
+            if (selectedClipIndex >= 0 && selectedClipIndex < clips.Count) { int selY = TrackTopPadding + clips[selectedClipIndex].LaneIndex * rowHeight - vScroll.Value; using var sb = new SolidBrush(Color.FromArgb(35, 70, 110, 150)); g.FillRectangle(sb, 0, selY, w, rowHeight); }
+            using var penRow = new Pen(Color.FromArgb(40, 45, 55)); for (int i = 0; i <= totalRows; i++) g.DrawLine(penRow, 0, TrackTopPadding + i * rowHeight - vScroll.Value, w, TrackTopPadding + i * rowHeight - vScroll.Value);
+            using (var ph = new Pen(Color.FromArgb(55, 60, 70))) g.DrawLine(ph, HeaderW, 0, HeaderW, h);
+            using var penSec = new Pen(Color.FromArgb(35, 40, 48)); for (int s = 0; s <= (int)Math.Ceiling(timelineSeconds); s++) { int x = HeaderW + s * pixelsPerSecond - timelineOffsetX; if (x >= HeaderW && x <= w) g.DrawLine(penSec, x, 0, x, h); }
 
-            using (var headerBrush = new SolidBrush(Color.FromArgb(30, 33, 40)))
-            {
-                g.FillRectangle(headerBrush, 0, 0, HeaderW, h);
-            }
-
-            if (selectedClipIndex >= 0 && selectedClipIndex < clips.Count)
-            {
-                int selLane = clips[selectedClipIndex].LaneIndex;
-                int selY = TrackTopPadding + selLane * rowHeight - vScroll.Value;
-                using var selBrush = new SolidBrush(Color.FromArgb(35, 70, 110, 150));
-                g.FillRectangle(selBrush, 0, selY, w, rowHeight);
-            }
-
-            using var penRow = new Pen(Color.FromArgb(40, 45, 55));
-            for (int i = 0; i <= totalRows; i++)
-            {
-                int y = TrackTopPadding + i * rowHeight - vScroll.Value;
-                g.DrawLine(penRow, 0, y, w, y);
-            }
-
-            using var penHeaderSep = new Pen(Color.FromArgb(55, 60, 70));
-            g.DrawLine(penHeaderSep, HeaderW, 0, HeaderW, h);
-
-            using var penSec = new Pen(Color.FromArgb(35, 40, 48));
-            int seconds = (int)Math.Ceiling(timelineSeconds);
-
-            for (int s = 0; s <= seconds; s++)
-            {
-                int x = HeaderW + s * pixelsPerSecond - timelineOffsetX;
-                if (x >= HeaderW && x <= w)
-                    g.DrawLine(penSec, x, 0, x, h);
-            }
-
-            using var trackFont = new Font("Segoe UI", 9, FontStyle.Bold);
-
-            for (int i = 0; i < totalRows; i++)
-            {
-                int y = TrackTopPadding + i * rowHeight - vScroll.Value;
-                if (y + rowHeight < 0 || y > h) continue;
-
-                bool isSelectedRow = selectedClipIndex >= 0 &&
-                                     selectedClipIndex < clips.Count &&
-                                     clips[selectedClipIndex].LaneIndex == i;
-
-                using var trackBrush = new SolidBrush(isSelectedRow ? Color.White : Color.Gainsboro);
-                g.DrawString($"TRACK {i + 1}", trackFont, trackBrush, 10, y + 10);
-            }
-
-            for (int i = 0; i < clips.Count; i++)
-            {
-                var clip = clips[i];
-                Rectangle rect = GetClipRectangle(clip);
-
-                if (rect.Bottom < 0 || rect.Top > h)
-                    continue;
-
-                DrawAudioClip(g, rect, clip, i == selectedClipIndex);
-            }
-
-            if (showPlayhead)
-            {
-                int xPlay = HeaderW + (int)(playheadSec * pixelsPerSecond) - timelineOffsetX;
-                using var playPen = new Pen(Color.WhiteSmoke, 2);
-                g.DrawLine(playPen, xPlay, 0, xPlay, h);
-            }
+            using var tf = new Font("Segoe UI", 9, FontStyle.Bold);
+            for (int i = 0; i < totalRows; i++) { int y = TrackTopPadding + i * rowHeight - vScroll.Value; if (y + rowHeight < 0 || y > h) continue; bool sel = selectedClipIndex >= 0 && selectedClipIndex < clips.Count && clips[selectedClipIndex].LaneIndex == i; using var tb = new SolidBrush(sel ? Color.White : Color.Gainsboro); g.DrawString($"TRACK {i + 1}", tf, tb, 10, y + 10); }
+            for (int i = 0; i < clips.Count; i++) { var rect = GetClipRectangle(clips[i]); if (rect.Bottom >= 0 && rect.Top <= h) DrawAudioClip(g, rect, clips[i], i == selectedClipIndex); }
+            if (showPlayhead) { int xp = HeaderW + (int)(playheadSec * pixelsPerSecond) - timelineOffsetX; using var pp = new Pen(Color.WhiteSmoke, 2); g.DrawLine(pp, xp, 0, xp, h); }
         }
 
-        private void DrawAudioClip(Graphics g, Rectangle rect, AudioClipInfo clip, bool isSelected)
+        private void DrawAudioClip(Graphics g, Rectangle rect, AudioClipInfo clip, bool sel)
         {
-            if (rect.Right < HeaderW || rect.Left > pnlTrackSurface.Width)
-                return;
+            if (rect.Right < HeaderW || rect.Left > pnlTrackSurface.Width) return;
+            using var cb = new SolidBrush(sel ? Color.FromArgb(70, 105, 185) : Color.FromArgb(48, 76, 140)); using var cp = new Pen(sel ? Color.FromArgb(255, 230, 140) : Color.FromArgb(110, 150, 240), sel ? 2 : 1);
+            using var wp = new Pen(Color.FromArgb(220, 235, 255), 1); using var ctp = new Pen(Color.FromArgb(90, 130, 210), 1);
+            using var tb = new SolidBrush(Color.WhiteSmoke); using var tf = new Font("Segoe UI", 8, FontStyle.Bold);
 
-            using var clipBrush = new SolidBrush(isSelected
-                ? Color.FromArgb(70, 105, 185)
-                : Color.FromArgb(48, 76, 140));
+            g.FillRectangle(cb, rect); g.DrawRectangle(cp, rect); int cy = rect.Top + rect.Height / 2; g.DrawLine(ctp, rect.Left + 1, cy, rect.Right - 1, cy);
 
-            using var clipBorder = new Pen(isSelected
-                ? Color.FromArgb(255, 230, 140)
-                : Color.FromArgb(110, 150, 240), isSelected ? 2 : 1);
-
-            using var wavePen = new Pen(Color.FromArgb(220, 235, 255), 1);
-            using var centerPen = new Pen(Color.FromArgb(90, 130, 210), 1);
-            using var txtBrush = new SolidBrush(Color.WhiteSmoke);
-            using var txtFont = new Font("Segoe UI", 8, FontStyle.Bold);
-
-            g.FillRectangle(clipBrush, rect);
-            g.DrawRectangle(clipBorder, rect);
-
-            int centerY = rect.Top + rect.Height / 2;
-            g.DrawLine(centerPen, rect.Left + 1, centerY, rect.Right - 1, centerY);
-
-            if (clip.Peaks != null && clip.Peaks.Count > 0 && rect.Width > 2)
+            if (clip.IsLoopClip && clip.PianoNotes != null && clip.PianoNotes.Count > 0)
             {
-                int peakCount = clip.Peaks.Count;
-                int halfHeight = Math.Max(1, rect.Height / 2 - 4);
+                int patternPx = Math.Max(10, (int)(clip.LoopLengthSec * pixelsPerSecond));
+                int repeats = (int)Math.Ceiling((double)rect.Width / patternPx);
 
-                for (int px = 0; px < rect.Width; px++)
+                for (int r = 0; r < repeats; r++)
                 {
-                    int startIndex = (int)(px * peakCount / (float)rect.Width);
-                    int endIndex = (int)((px + 1) * peakCount / (float)rect.Width);
+                    int subLeft = rect.Left + r * patternPx;
+                    int subW = Math.Min(patternPx, rect.Right - subLeft);
+                    if (subW <= 0) break;
 
-                    if (endIndex <= startIndex)
-                        endIndex = startIndex + 1;
-
-                    if (endIndex > peakCount)
-                        endIndex = peakCount;
-
-                    float max = 0f;
-                    for (int i = startIndex; i < endIndex; i++)
-                    {
-                        if (clip.Peaks[i] > max)
-                            max = clip.Peaks[i];
-                    }
-
-                    int amp = (int)(max * halfHeight);
-                    int x = rect.Left + px;
-
-                    g.DrawLine(wavePen, x, centerY - amp, x, centerY + amp);
+                    // Passo il parametro patternPx così i rettangolini non si deformano alla fine
+                    DrawMiniPianoRoll(g, new Rectangle(subLeft, rect.Top, subW, rect.Height), clip, patternPx);
                 }
             }
+            else if (clip.PeaksReady && clip.Peaks?.Count > 0 && rect.Width > 2)
+            {
+                DrawWaveformSegment(g, rect, clip.Peaks, wp, ctp);
+            }
 
-            string text = $"{clip.DisplayName} ({clip.DurationSec:0.0}s)";
-            g.DrawString(text, txtFont, txtBrush, rect.Left + 6, rect.Top + 4);
+            g.DrawString($"{clip.DisplayName} ({clip.DurationSec:0.0}s)", tf, tb, rect.Left + 6, rect.Top + 4);
         }
 
-        // =========================
-        //  CLEANUP
-        // =========================
-        protected override void OnFormClosing(FormClosingEventArgs e)
+        private void DrawMiniPianoRoll(Graphics g, Rectangle rect, AudioClipInfo clip, int patternPx)
         {
-            timerPlay?.Stop();
+            if (clip.TotalSteps <= 0) return;
+            float stepW = (float)patternPx / clip.TotalSteps;
+            float noteH = (float)rect.Height / NoteNames.Length;
 
-            try
+            using var noteBrush = new SolidBrush(Color.FromArgb(200, 220, 255));
+            using var borderPen = new Pen(Color.FromArgb(100, 150, 255), 1);
+
+            foreach (var n in clip.PianoNotes)
             {
-                waveSource?.StopRecording();
+                int noteIdx = Array.IndexOf(NoteNames, n.Note);
+                if (noteIdx < 0) continue;
+
+                float nx = rect.Left + n.Step * stepW;
+                float ny = rect.Top + noteIdx * noteH;
+                float nw = n.Length * stepW;
+
+                if (nx > rect.Right) continue;
+                if (nx + nw > rect.Right) nw = rect.Right - nx;
+
+                var noteRect = new RectangleF(nx, ny, nw, Math.Max(1, noteH));
+                g.FillRectangle(noteBrush, noteRect);
+                g.DrawRectangle(borderPen, nx, ny, nw, Math.Max(1, noteH));
             }
-            catch
-            {
-            }
-
-            waveFile?.Dispose();
-            waveSource?.Dispose();
-
-            StopPlaybackInternal(resetToZero: false);
-
-            base.OnFormClosing(e);
         }
+
+        private void DrawWaveformSegment(Graphics g, Rectangle rect, List<float> peaks, Pen wavePen, Pen centerPen)
+        {
+            if (peaks.Count == 0) return;
+            int pc = peaks.Count; int hh = Math.Max(1, rect.Height / 2 - 4); int centerY = rect.Top + rect.Height / 2;
+            for (int px = 0; px < rect.Width; px++)
+            {
+                int si = (int)(px * pc / (float)rect.Width); int ei = Math.Min(pc, (int)((px + 1) * pc / (float)rect.Width));
+                float mx = 0f; for (int i = si; i < ei; i++) if (peaks[i] > mx) mx = peaks[i];
+                int amp = (int)(mx * hh); g.DrawLine(wavePen, rect.Left + px, centerY - amp, rect.Left + px, centerY + amp);
+            }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e) { timerPlay?.Stop(); try { waveSource?.StopRecording(); } catch { } waveFile?.Dispose(); waveSource?.Dispose(); StopPlaybackInternal(false); base.OnFormClosing(e); }
+    }
+
+    internal class DarkMenuRenderer : ToolStripProfessionalRenderer
+    {
+        public DarkMenuRenderer() : base(new DarkColorTable()) { }
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) { var rect = new Rectangle(Point.Empty, e.Item.Size); var color = e.Item.Selected ? Color.FromArgb(65, 70, 90) : Color.FromArgb(45, 49, 58); using var brush = new SolidBrush(color); e.Graphics.FillRectangle(brush, rect); }
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) { e.TextColor = Color.White; base.OnRenderItemText(e); }
+    }
+
+    internal class DarkColorTable : ProfessionalColorTable
+    {
+        public override Color MenuBorder => Color.FromArgb(60, 65, 80); public override Color MenuItemBorder => Color.FromArgb(65, 70, 90); public override Color MenuItemSelected => Color.FromArgb(65, 70, 90); public override Color MenuItemSelectedGradientBegin => Color.FromArgb(65, 70, 90); public override Color MenuItemSelectedGradientEnd => Color.FromArgb(65, 70, 90); public override Color MenuStripGradientBegin => Color.FromArgb(45, 49, 58); public override Color MenuStripGradientEnd => Color.FromArgb(45, 49, 58); public override Color ToolStripDropDownBackground => Color.FromArgb(45, 49, 58); public override Color ImageMarginGradientBegin => Color.FromArgb(45, 49, 58); public override Color ImageMarginGradientMiddle => Color.FromArgb(45, 49, 58); public override Color ImageMarginGradientEnd => Color.FromArgb(45, 49, 58);
     }
 }
