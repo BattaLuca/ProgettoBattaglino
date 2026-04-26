@@ -6,11 +6,33 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Xml.Serialization;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
 namespace ProgettoBattaglino
 {
+    // ==========================================
+    // CLASSE PER IL SALVATAGGIO DEI PROGETTI
+    // ==========================================
+    public class AudioClipSaveData
+    {
+        public string FilePath { get; set; }
+        public string DisplayName { get; set; }
+        public float StartSec { get; set; }
+        public float DurationSec { get; set; }
+        public int LaneIndex { get; set; }
+        public float Volume { get; set; }
+        public bool IsLoopClip { get; set; }
+        public float LoopLengthSec { get; set; }
+        public List<SequencerNote> PianoNotes { get; set; }
+        public int TotalSteps { get; set; }
+        public float StepLengthSec { get; set; }
+
+        // Nuova variabile per distinguere la batteria
+        public bool IsDrumKit { get; set; }
+    }
+
     internal class BufferedPanel : Panel
     {
         public BufferedPanel()
@@ -31,11 +53,13 @@ namespace ProgettoBattaglino
         // =========================
         private const string ImportFolderPath = @"C:\Users\Luca\Desktop\scuola\PROGETTO\ProgettoBattaglino\ProgettoBattaglino\Registrazioni";
         private static readonly string StrumentiPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Strumenti");
+        private static readonly string ProgettiPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "progetti");
 
         private const int MixerSampleRate = 44100;
         private const int MixerChannels = 2;
 
         private static readonly string[] NoteNames = new[] { "C5", "B4", "A#4", "A4", "G#4", "G4", "F#4", "F4", "E4", "D#4", "D4", "C#4", "C4", "B3", "A#3", "A3", "G#3", "G3", "F#3", "F3", "E3", "D#3", "D3", "C#3", "C3" };
+        private static readonly string[] DrumPieces = new[] { "Crash", "Ride", "HiHat", "Tom", "Snare", "Kick" };
 
         // =========================
         //  LAYOUT UI (DAW)
@@ -113,10 +137,12 @@ namespace ProgettoBattaglino
             public bool IsLoopClip { get; set; } = false;
             public float LoopLengthSec { get; set; } = 0f;
 
-            // Proprietà per il Mini Piano Roll e lo Snap
             public List<SequencerNote> PianoNotes { get; set; }
             public int TotalSteps { get; set; }
             public float StepLengthSec { get; set; } = 0f;
+
+            // Distinzione visiva
+            public bool IsDrumKit { get; set; } = false;
         }
 
         private readonly List<AudioClipInfo> clips = new List<AudioClipInfo>();
@@ -182,21 +208,164 @@ namespace ProgettoBattaglino
         {
             menuStripMain = new MenuStrip { Dock = DockStyle.Top, BackColor = Color.FromArgb(45, 49, 58), ForeColor = Color.White, Renderer = new DarkMenuRenderer() };
             menuFile = new ToolStripMenuItem("File");
-            menuImporta = new ToolStripMenuItem("Importa");
+
+            // NUOVO PROGETTO
+            var menuNuovo = new ToolStripMenuItem("Nuovo Progetto");
+            menuNuovo.Click += (s, e) => {
+                StopPlaybackInternal(true);
+                clips.Clear();
+                selectedClipIndex = -1;
+                UpdateProjectLength();
+                RebuildMixerTracks();
+                LayoutAll();
+            };
+            menuFile.DropDownItems.Add(menuNuovo);
+            menuFile.DropDownItems.Add(new ToolStripSeparator());
+
+            // SALVA PROGETTO
+            var menuSalva = new ToolStripMenuItem("Salva Progetto...");
+            menuSalva.Click += (s, e) => SaveProject();
+            menuFile.DropDownItems.Add(menuSalva);
+
+            // CARICA PROGETTO
+            var menuCarica = new ToolStripMenuItem("Carica Progetto...");
+            menuCarica.Click += (s, e) => LoadProject();
+            menuFile.DropDownItems.Add(menuCarica);
+            menuFile.DropDownItems.Add(new ToolStripSeparator());
+
+            // IMPORTA AUDIO
+            menuImporta = new ToolStripMenuItem("Importa Audio...");
             menuImporta.Click += (s, e) => ImportAudioFile();
             menuFile.DropDownItems.Add(menuImporta);
+
             menuStripMain.Items.Add(menuFile);
 
             menuAggiungi = new ToolStripMenuItem("Aggiungi");
             menuStripMain.Items.Add(menuAggiungi);
             RefreshAggiungiMenu();
+
             MainMenuStrip = menuStripMain;
             Controls.Add(menuStripMain);
+        }
+
+        // ==========================================
+        // FUNZIONI DI SALVATAGGIO / CARICAMENTO
+        // ==========================================
+        private void SaveProject()
+        {
+            try
+            {
+                Directory.CreateDirectory(ProgettiPath);
+                using (var sfd = new SaveFileDialog { InitialDirectory = ProgettiPath, Filter = "Progetto DAW (*.daw)|*.daw", DefaultExt = "daw" })
+                {
+                    if (sfd.ShowDialog() == DialogResult.OK)
+                    {
+                        var saveData = clips.Select(c => new AudioClipSaveData
+                        {
+                            FilePath = c.FilePath,
+                            DisplayName = c.DisplayName,
+                            StartSec = c.StartSec,
+                            DurationSec = c.DurationSec,
+                            LaneIndex = c.LaneIndex,
+                            Volume = c.Volume,
+                            IsLoopClip = c.IsLoopClip,
+                            LoopLengthSec = c.LoopLengthSec,
+                            TotalSteps = c.TotalSteps,
+                            StepLengthSec = c.StepLengthSec,
+                            IsDrumKit = c.IsDrumKit,
+                            PianoNotes = c.PianoNotes?.ToList()
+                        }).ToList();
+
+                        var serializer = new XmlSerializer(typeof(List<AudioClipSaveData>));
+                        using (var stream = new StreamWriter(sfd.FileName))
+                        {
+                            serializer.Serialize(stream, saveData);
+                        }
+                        MessageBox.Show("Progetto salvato con successo!", "Salvataggio", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Errore durante il salvataggio:\n" + ex.Message, "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void LoadProject()
+        {
+            try
+            {
+                Directory.CreateDirectory(ProgettiPath);
+                using (var ofd = new OpenFileDialog { InitialDirectory = ProgettiPath, Filter = "Progetto DAW (*.daw)|*.daw" })
+                {
+                    if (ofd.ShowDialog() == DialogResult.OK)
+                    {
+                        StopPlaybackInternal(true);
+                        clips.Clear();
+
+                        var serializer = new XmlSerializer(typeof(List<AudioClipSaveData>));
+                        List<AudioClipSaveData> loadedData;
+                        using (var stream = new StreamReader(ofd.FileName))
+                        {
+                            loadedData = (List<AudioClipSaveData>)serializer.Deserialize(stream);
+                        }
+
+                        foreach (var data in loadedData)
+                        {
+                            var clip = new AudioClipInfo
+                            {
+                                FilePath = data.FilePath,
+                                DisplayName = data.DisplayName,
+                                StartSec = data.StartSec,
+                                DurationSec = data.DurationSec,
+                                LaneIndex = data.LaneIndex,
+                                Volume = data.Volume,
+                                IsLoopClip = data.IsLoopClip,
+                                LoopLengthSec = data.LoopLengthSec,
+                                TotalSteps = data.TotalSteps,
+                                StepLengthSec = data.StepLengthSec,
+                                IsDrumKit = data.IsDrumKit,
+                                PianoNotes = data.PianoNotes?.ToList()
+                            };
+
+                            clips.Add(clip);
+                            if (!clip.IsLoopClip || clip.PianoNotes == null)
+                            {
+                                BuildWaveformPeaksAsync(clip, 2500);
+                            }
+                        }
+
+                        selectedClipIndex = -1;
+                        UpdateProjectLength();
+                        playheadSec = 0f; showPlayhead = false; timelineOffsetX = 0;
+                        if (hScroll != null) hScroll.Value = hScroll.Minimum;
+                        if (vScroll != null) vScroll.Value = vScroll.Minimum;
+
+                        RebuildMixerTracks();
+                        LayoutAll();
+                        pnlRuler.Refresh();
+                        pnlTrackSurface.Refresh();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Errore durante il caricamento:\n" + ex.Message, "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void RefreshAggiungiMenu()
         {
             menuAggiungi.DropDownItems.Clear();
+
+            // ===================================
+            // MENU BATTERIA
+            // ===================================
+            var menuBatteria = new ToolStripMenuItem("Batteria (DrumKit)");
+            menuBatteria.Click += (s, e) => { var frm = new DrumKitForm(); frm.Show(this); };
+            menuAggiungi.DropDownItems.Add(menuBatteria);
+            menuAggiungi.DropDownItems.Add(new ToolStripSeparator());
+
             if (!Directory.Exists(StrumentiPath)) { menuAggiungi.DropDownItems.Add(new ToolStripMenuItem("(nessuno strumento trovato)") { Enabled = false }); return; }
             var dirs = Directory.GetDirectories(StrumentiPath).OrderBy(d => d).ToArray();
             if (dirs.Length == 0) { menuAggiungi.DropDownItems.Add(new ToolStripMenuItem("(nessuno strumento trovato)") { Enabled = false }); return; }
@@ -204,13 +373,16 @@ namespace ProgettoBattaglino
             foreach (string dir in dirs)
             {
                 string instrumentName = Path.GetFileName(dir);
+                // Evita di caricare la Batteria come fosse un piano roll
+                if (instrumentName.Equals("Batteria", StringComparison.OrdinalIgnoreCase)) continue;
+
                 string samplePath = Path.Combine(dir, "C4.wav");
                 if (!File.Exists(samplePath)) continue;
                 var item = new ToolStripMenuItem(instrumentName) { Tag = instrumentName };
                 item.Click += (s, e) => OpenInstrumentForm((string)((ToolStripMenuItem)s).Tag);
                 menuAggiungi.DropDownItems.Add(item);
             }
-            if (menuAggiungi.DropDownItems.Count == 0) menuAggiungi.DropDownItems.Add(new ToolStripMenuItem("(nessun C4.wav trovato)") { Enabled = false });
+            if (menuAggiungi.DropDownItems.Count == 2) menuAggiungi.DropDownItems.Add(new ToolStripMenuItem("(nessun C4.wav trovato)") { Enabled = false });
         }
 
         private void OpenInstrumentForm(string instrumentName)
@@ -267,15 +439,15 @@ namespace ProgettoBattaglino
         }
 
         // =========================
-        //  AGGIUNGI MELODIA CON DATI PIANO ROLL E SNAP
+        //  AGGIUNGI MELODIA CON DATI E SNAP (Pianoroll + Batteria)
         // =========================
-        public void AddMelodyClip(string filePath, float patternDuration, List<SequencerNote> notes, int totalSteps, float stepSec)
+        public void AddMelodyClip(string filePath, float patternDuration, List<SequencerNote> notes, int totalSteps, float stepSec, bool isDrumKit)
         {
             if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return;
             var newClip = new AudioClipInfo
             {
                 FilePath = filePath,
-                DisplayName = Path.GetFileNameWithoutExtension(filePath) + " (melodia)",
+                DisplayName = Path.GetFileNameWithoutExtension(filePath) + (isDrumKit ? " (batteria)" : " (melodia)"),
                 StartSec = 0f,
                 DurationSec = patternDuration,
                 LaneIndex = GetFirstFreeLaneIndex(),
@@ -284,7 +456,8 @@ namespace ProgettoBattaglino
                 LoopLengthSec = patternDuration,
                 PianoNotes = new List<SequencerNote>(notes),
                 TotalSteps = totalSteps,
-                StepLengthSec = stepSec // Cruciale per lo snap nota per nota!
+                StepLengthSec = stepSec,
+                IsDrumKit = isDrumKit
             };
             clips.Add(newClip);
             selectedClipIndex = clips.IndexOf(newClip);
@@ -579,7 +752,6 @@ namespace ProgettoBattaglino
 
                 var clip = clips[draggingClipIndex];
 
-                // === SNAP "NOTA PER NOTA" ===
                 if (clip.IsLoopClip && clip.StepLengthSec > 0)
                 {
                     newDur = (float)Math.Round(newDur / clip.StepLengthSec) * clip.StepLengthSec;
@@ -696,7 +868,6 @@ namespace ProgettoBattaglino
                     int subW = Math.Min(patternPx, rect.Right - subLeft);
                     if (subW <= 0) break;
 
-                    // Passo il parametro patternPx così i rettangolini non si deformano alla fine
                     DrawMiniPianoRoll(g, new Rectangle(subLeft, rect.Top, subW, rect.Height), clip, patternPx);
                 }
             }
@@ -712,14 +883,16 @@ namespace ProgettoBattaglino
         {
             if (clip.TotalSteps <= 0) return;
             float stepW = (float)patternPx / clip.TotalSteps;
-            float noteH = (float)rect.Height / NoteNames.Length;
 
-            using var noteBrush = new SolidBrush(Color.FromArgb(200, 220, 255));
-            using var borderPen = new Pen(Color.FromArgb(100, 150, 255), 1);
+            var layoutNames = clip.IsDrumKit ? DrumPieces : NoteNames;
+            float noteH = (float)rect.Height / layoutNames.Length;
+
+            using var noteBrush = new SolidBrush(clip.IsDrumKit ? Color.FromArgb(255, 180, 100) : Color.FromArgb(200, 220, 255));
+            using var borderPen = new Pen(clip.IsDrumKit ? Color.FromArgb(255, 140, 50) : Color.FromArgb(100, 150, 255), 1);
 
             foreach (var n in clip.PianoNotes)
             {
-                int noteIdx = Array.IndexOf(NoteNames, n.Note);
+                int noteIdx = Array.IndexOf(layoutNames, n.Note);
                 if (noteIdx < 0) continue;
 
                 float nx = rect.Left + n.Step * stepW;

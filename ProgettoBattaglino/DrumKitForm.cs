@@ -10,33 +10,20 @@ using NAudio.Wave.SampleProviders;
 
 namespace ProgettoBattaglino
 {
-    public class SequencerNote
+    public class DrumKitForm : Form
     {
-        public int Step { get; set; }
-        public int Length { get; set; }
-        public string Note { get; set; }
-
-        public SequencerNote() { }
-    }
-
-    public class InstrumentForm : Form
-    {
-        private static readonly string[] NoteNames = new[]
+        private static readonly string[] DrumPieces = new[]
         {
-            "C5","B4","A#4","A4","G#4","G4","F#4","F4","E4","D#4","D4","C#4","C4",
-            "B3","A#3","A3","G#3","G3","F#3","F3","E3","D#3","D3","C#3","C3"
+            "Crash", "Ride", "HiHat", "Tom", "Snare", "Kick"
         };
 
         private int currentSteps = 16;
         private const int CellW = 48;
         private const int CellH = 26;
-        private const int PianoW = 64;
+        private const int PianoW = 80; // Più largo per accogliere comodamente le scritte
         private const int HeaderH = 32;
         private const int MixerRate = 44100;
         private const int MixerCh = 2;
-
-        private readonly string instrumentName;
-        private readonly string samplePath;
 
         private readonly List<SequencerNote> activeNotes = new List<SequencerNote>();
 
@@ -51,31 +38,27 @@ namespace ProgettoBattaglino
         private Button btnPlay;
         private Button btnStop;
         private Button btnAddMelody;
-        private CheckBox chkPedal;
         private TrackBar trkBpm;
         private Label lblBpm;
 
         private SequencerNote draggingNote = null;
         private bool isErasing = false;
 
-        public InstrumentForm(string instrumentName, string samplePath)
+        public DrumKitForm()
         {
-            this.instrumentName = instrumentName;
-            this.samplePath = samplePath;
-
             InitForm();
         }
 
         private void InitForm()
         {
-            Text = $"Piano Roll — {instrumentName}";
+            Text = "Drum Kit — Batteria";
             BackColor = Color.FromArgb(28, 30, 36);
             ForeColor = Color.Gainsboro;
             Font = new Font("Segoe UI", 9);
             FormBorderStyle = FormBorderStyle.Sizable;
             MinimizeBox = true;
             MaximizeBox = true;
-            MinimumSize = new Size(600, 400);
+            MinimumSize = new Size(600, 300);
             StartPosition = FormStartPosition.CenterParent;
 
             var toolbar = new Panel { Dock = DockStyle.Top, Height = 48, BackColor = Color.FromArgb(38, 41, 50) };
@@ -83,7 +66,7 @@ namespace ProgettoBattaglino
 
             btnPlay = MakeBtn("▶  Play", 10, 10, 80);
             btnStop = MakeBtn("■  Stop", 98, 10, 80);
-            btnAddMelody = MakeBtn("Aggiungi melodia al DAW", 200, 10, 180);
+            btnAddMelody = MakeBtn("Aggiungi batteria al DAW", 200, 10, 180);
             btnPlay.Click += (s, e) => StartSequencer();
             btnStop.Click += (s, e) => StopSequencer();
             btnAddMelody.Click += BtnAddMelody_Click;
@@ -92,13 +75,10 @@ namespace ProgettoBattaglino
             toolbar.Controls.Add(btnStop);
             toolbar.Controls.Add(btnAddMelody);
 
-            chkPedal = new CheckBox { Text = "Pedale Sustain", Checked = true, ForeColor = Color.Gainsboro, BackColor = Color.Transparent, Location = new Point(400, 15), AutoSize = true };
-            toolbar.Controls.Add(chkPedal);
-
-            lblBpm = new Label { Text = $"BPM: {bpm}", ForeColor = Color.Gainsboro, AutoSize = true, Location = new Point(580, 15) };
+            lblBpm = new Label { Text = $"BPM: {bpm}", ForeColor = Color.Gainsboro, AutoSize = true, Location = new Point(400, 15) };
             toolbar.Controls.Add(lblBpm);
 
-            trkBpm = new TrackBar { Minimum = 40, Maximum = 240, Value = bpm, TickStyle = TickStyle.None, Width = 140, Height = 30, Location = new Point(640, 10) };
+            trkBpm = new TrackBar { Minimum = 40, Maximum = 240, Value = bpm, TickStyle = TickStyle.None, Width = 140, Height = 30, Location = new Point(450, 10) };
             trkBpm.Scroll += (s, e) => { bpm = trkBpm.Value; lblBpm.Text = $"BPM: {bpm}"; };
             toolbar.Controls.Add(trkBpm);
 
@@ -134,7 +114,7 @@ namespace ProgettoBattaglino
             int availableWidth = ClientSize.Width - 40;
             currentSteps = Math.Max(8, (availableWidth - PianoW) / CellW);
             int gridW = PianoW + currentSteps * CellW + 2;
-            int gridH = HeaderH + NoteNames.Length * CellH + 2;
+            int gridH = HeaderH + DrumPieces.Length * CellH + 2;
 
             pnlGrid.Size = new Size(gridW, gridH);
             pnlGrid.Location = new Point(10, 56);
@@ -163,13 +143,11 @@ namespace ProgettoBattaglino
                 g.DrawString((s + 1).ToString(), stepFont, stepBrush, x + 4, 8);
             }
 
-            for (int ni = 0; ni < NoteNames.Length; ni++)
+            for (int ni = 0; ni < DrumPieces.Length; ni++)
             {
-                string note = NoteNames[ni];
+                string piece = DrumPieces[ni];
                 int y = HeaderH + ni * CellH;
-                bool isC = note.StartsWith("C") && !note.Contains("#");
-                bool isBlack = note.Contains("#");
-                Color rowBg = isC ? Color.FromArgb(32, 36, 50) : (isBlack ? Color.FromArgb(22, 24, 32) : Color.FromArgb(28, 31, 40));
+                Color rowBg = (ni % 2 == 0) ? Color.FromArgb(32, 36, 50) : Color.FromArgb(28, 31, 40);
 
                 for (int s = 0; s < currentSteps; s++)
                 {
@@ -179,11 +157,11 @@ namespace ProgettoBattaglino
                     g.FillRectangle(cellBrush, x + 1, y + 1, CellW - 1, CellH - 1);
                 }
 
-                using var pianoBrush = new SolidBrush(isBlack ? Color.FromArgb(35, 35, 42) : Color.FromArgb(220, 222, 230));
+                using var pianoBrush = new SolidBrush(Color.FromArgb(45, 45, 55));
                 g.FillRectangle(pianoBrush, 1, y + 1, PianoW - 2, CellH - 1);
-                using var pianoTxt = new SolidBrush(isBlack ? Color.FromArgb(180, 185, 200) : Color.FromArgb(50, 50, 60));
-                using var noteFont = new Font("Segoe UI", 8, isC ? FontStyle.Bold : FontStyle.Regular);
-                g.DrawString(note, noteFont, pianoTxt, 4, y + CellH / 2 - 7);
+                using var pianoTxt = new SolidBrush(Color.FromArgb(200, 200, 200));
+                using var noteFont = new Font("Segoe UI", 8, FontStyle.Bold);
+                g.DrawString(piece, noteFont, pianoTxt, 4, y + CellH / 2 - 7);
 
                 using var sep = new Pen(Color.FromArgb(40, 44, 58), 1);
                 g.DrawLine(sep, 0, y, PianoW + currentSteps * CellW, y);
@@ -193,28 +171,27 @@ namespace ProgettoBattaglino
             {
                 int x = PianoW + s * CellW;
                 using var vp = new Pen(s % 4 == 0 ? Color.FromArgb(60, 66, 84) : Color.FromArgb(38, 42, 54), 1);
-                g.DrawLine(vp, x, 0, x, HeaderH + NoteNames.Length * CellH);
+                g.DrawLine(vp, x, 0, x, HeaderH + DrumPieces.Length * CellH);
             }
 
             foreach (var n in activeNotes)
             {
-                int ni = Array.IndexOf(NoteNames, n.Note);
+                int ni = Array.IndexOf(DrumPieces, n.Note);
                 if (ni < 0) continue;
 
                 int x = PianoW + n.Step * CellW;
                 int y = HeaderH + ni * CellH;
                 int w = n.Length * CellW;
 
-                bool isBlack = n.Note.Contains("#");
-                Color cellBg = isBlack ? Color.FromArgb(60, 100, 200) : Color.FromArgb(75, 120, 220);
+                Color cellBg = Color.FromArgb(200, 100, 50);
 
                 if (isPlaying && playStep >= n.Step && playStep < n.Step + n.Length)
-                    cellBg = Color.FromArgb(120, 190, 255);
+                    cellBg = Color.FromArgb(255, 140, 80);
 
                 using var cellBrush = new SolidBrush(cellBg);
                 g.FillRectangle(cellBrush, x + 1, y + 1, w - 2, CellH - 2);
 
-                using var border = new Pen(Color.FromArgb(150, 200, 255), 2);
+                using var border = new Pen(Color.FromArgb(255, 180, 100), 2);
                 g.DrawRectangle(border, x + 1, y + 1, w - 3, CellH - 3);
             }
 
@@ -226,16 +203,16 @@ namespace ProgettoBattaglino
             }
 
             using var pianoSep = new Pen(Color.FromArgb(60, 66, 84), 2);
-            g.DrawLine(pianoSep, PianoW, 0, PianoW, HeaderH + NoteNames.Length * CellH);
+            g.DrawLine(pianoSep, PianoW, 0, PianoW, HeaderH + DrumPieces.Length * CellH);
         }
 
         private void PnlGrid_MouseDown(object sender, MouseEventArgs e)
         {
             if (e.X < PianoW) return;
             int s = (e.X - PianoW) / CellW; int ni = (e.Y - HeaderH) / CellH;
-            if (s < 0 || s >= currentSteps || ni < 0 || ni >= NoteNames.Length) return;
+            if (s < 0 || s >= currentSteps || ni < 0 || ni >= DrumPieces.Length) return;
 
-            string note = NoteNames[ni];
+            string note = DrumPieces[ni];
             var existing = activeNotes.FirstOrDefault(n => n.Note == note && s >= n.Step && s < n.Step + n.Length);
 
             if (existing != null)
@@ -248,7 +225,7 @@ namespace ProgettoBattaglino
                 draggingNote = new SequencerNote { Step = s, Length = 1, Note = note };
                 activeNotes.Add(draggingNote);
                 isErasing = false;
-                PlayNotePreview(note);
+                PlayDrumPreview(note);
             }
             pnlGrid.Invalidate();
         }
@@ -322,10 +299,10 @@ namespace ProgettoBattaglino
                 float stepSec = 60f / bpm / 4f;
                 foreach (var note in notesThisStep)
                 {
-                    var pitched = BuildPitchedSample(note.Note);
-                    if (pitched != null)
+                    var sample = BuildDrumSample(note.Note);
+                    if (sample != null)
                     {
-                        var offset = new OffsetSampleProvider(pitched)
+                        var offset = new OffsetSampleProvider(sample)
                         {
                             DelayBy = TimeSpan.Zero,
                             Take = TimeSpan.FromSeconds(note.Length * stepSec)
@@ -341,7 +318,7 @@ namespace ProgettoBattaglino
 
         private void BtnAddMelody_Click(object sender, EventArgs e)
         {
-            if (activeNotes.Count == 0) { MessageBox.Show("Nessuna nota nel sequencer!", "Attenzione", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (activeNotes.Count == 0) { MessageBox.Show("Nessun pezzo nel DrumKit!", "Attenzione", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
 
             StopSequencer();
             Application.DoEvents();
@@ -352,17 +329,17 @@ namespace ProgettoBattaglino
             int neededSteps = ((lastStepInvolved / 4) + 1) * 4;
             float patternDuration = neededSteps * stepSec;
 
-            string tempWav = Path.Combine(Path.GetTempPath(), $"Melodia_{instrumentName}_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+            string tempWav = Path.Combine(Path.GetTempPath(), $"Batteria_{DateTime.Now:yyyyMMdd_HHmmss}.wav");
 
             try
             {
                 var mixer = new MixingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(MixerRate, MixerCh)) { ReadFully = false };
                 foreach (var entry in activeNotes)
                 {
-                    var pitched = BuildPitchedSample(entry.Note);
-                    if (pitched != null)
+                    var sample = BuildDrumSample(entry.Note);
+                    if (sample != null)
                     {
-                        var offset = new OffsetSampleProvider(pitched)
+                        var offset = new OffsetSampleProvider(sample)
                         {
                             DelayBy = TimeSpan.FromSeconds(entry.Step * stepSec),
                             Take = TimeSpan.FromSeconds(entry.Length * stepSec)
@@ -394,67 +371,68 @@ namespace ProgettoBattaglino
                 }
 
                 if (Owner is Form1 mainForm)
-                    mainForm.AddMelodyClip(tempWav, patternDuration, activeNotes, neededSteps, stepSec, false);
+                    mainForm.AddMelodyClip(tempWav, patternDuration, activeNotes, neededSteps, stepSec, true);
 
-                MessageBox.Show($"Melodia esportata correttamente!\nDurata: {patternDuration:F2}s ({neededSteps} step)", "Successo");
+                MessageBox.Show($"Batteria esportata correttamente!\nDurata: {patternDuration:F2}s ({neededSteps} step)", "Successo");
                 this.Close();
             }
             catch (Exception ex) { MessageBox.Show("Errore:\n" + ex.Message, "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         }
 
-        private static readonly Dictionary<string, int> NoteToSemitone = BuildNoteMap();
-        private static Dictionary<string, int> BuildNoteMap()
-        {
-            var chromatic = new[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-            var map = new Dictionary<string, int>();
-            for (int oct = 2; oct <= 6; oct++) for (int i = 0; i < chromatic.Length; i++) map[chromatic[i] + oct] = (oct - 4) * 12 + i;
-            return map;
-        }
-
-        private static double PitchFactor(string note) => NoteToSemitone.TryGetValue(note, out int semi) ? Math.Pow(2.0, semi / 12.0) : 1.0;
-
-        private void PlayNotePreview(string note)
-        {
-            if (!File.Exists(samplePath)) return;
-            try { var samples = BuildPitchedSample(note); if (samples == null) return; var preview = new WaveOutEvent(); preview.Init(samples); preview.PlaybackStopped += (s, e2) => preview.Dispose(); preview.Play(); } catch { }
-        }
-
-        private ISampleProvider BuildPitchedSample(string note)
+        private void PlayDrumPreview(string piece)
         {
             try
             {
-                var reader = new AudioFileReader(samplePath);
-                ISampleProvider stereo = reader.WaveFormat.Channels == 1 ? new MonoToStereoSampleProvider(reader) : (ISampleProvider)reader;
-                double factor = PitchFactor(note);
-                int virtualSR = Math.Max(8000, Math.Min(192000, (int)Math.Round(reader.WaveFormat.SampleRate * factor)));
-                return new AutoDisposeSampleProvider(new WdlResamplingSampleProvider(new FakeSampleRateProvider(stereo, virtualSR), MixerRate), reader);
+                var samples = BuildDrumSample(piece);
+                if (samples == null) return;
+                var preview = new WaveOutEvent();
+                preview.Init(samples);
+                preview.PlaybackStopped += (s, e2) => preview.Dispose();
+                preview.Play();
             }
-            catch { return null; }
+            catch { }
         }
-    }
 
-    internal class AutoDisposeSampleProvider : ISampleProvider
-    {
-        private readonly ISampleProvider source;
-        private readonly IDisposable resourceToDispose;
-        private bool isDisposed;
-
-        public AutoDisposeSampleProvider(ISampleProvider source, IDisposable resourceToDispose) { this.source = source; this.resourceToDispose = resourceToDispose; }
-        public WaveFormat WaveFormat => source.WaveFormat;
-        public int Read(float[] buffer, int offset, int count)
+        private ISampleProvider BuildDrumSample(string piece)
         {
-            if (isDisposed) return 0;
-            int read = source.Read(buffer, offset, count);
-            if (read == 0) { resourceToDispose?.Dispose(); isDisposed = true; }
-            return read;
-        }
-    }
+            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Strumenti", "Batteria", $"{piece}.wav");
 
-    internal class FakeSampleRateProvider : ISampleProvider
-    {
-        private readonly ISampleProvider source; private readonly WaveFormat fakeFormat;
-        public FakeSampleRateProvider(ISampleProvider source, int fakeSampleRate) { this.source = source; fakeFormat = WaveFormat.CreateIeeeFloatWaveFormat(fakeSampleRate, source.WaveFormat.Channels); }
-        public WaveFormat WaveFormat => fakeFormat;
-        public int Read(float[] buffer, int offset, int count) => source.Read(buffer, offset, count);
+            // 1. Controllo se il file esiste fisicamente
+            if (!File.Exists(path))
+            {
+                MessageBox.Show($"File non trovato: {path}\nAssicurati di averlo chiamato esattamente '{piece}.wav'", "Manca file", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
+            }
+
+            try
+            {
+                // 2. Lettura standard (funziona con 16-bit PCM)
+                var reader = new AudioFileReader(path);
+                ISampleProvider stereo = reader.WaveFormat.Channels == 1 ? new MonoToStereoSampleProvider(reader) : (ISampleProvider)reader;
+                ISampleProvider resampled = reader.WaveFormat.SampleRate == MixerRate ? stereo : new WdlResamplingSampleProvider(stereo, MixerRate);
+
+                return new AutoDisposeSampleProvider(resampled, reader);
+            }
+            catch
+            {
+                try
+                {
+                    // 3. Fallback d'emergenza per WAV a 24/32-bit e compressi
+                    var mfReader = new MediaFoundationReader(path);
+                    var sampleProvider = mfReader.ToSampleProvider();
+
+                    ISampleProvider stereo = sampleProvider.WaveFormat.Channels == 1 ? new MonoToStereoSampleProvider(sampleProvider) : sampleProvider;
+                    ISampleProvider resampled = sampleProvider.WaveFormat.SampleRate == MixerRate ? stereo : new WdlResamplingSampleProvider(stereo, MixerRate);
+
+                    return new AutoDisposeSampleProvider(resampled, mfReader);
+                }
+                catch (Exception ex)
+                {
+                    // 4. Mostra il vero errore
+                    MessageBox.Show($"Impossibile leggere l'audio di {piece}.wav!\nMotivo: {ex.Message}\n\nProva a convertire il file in WAV 16-bit.", "Errore Formato Audio", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return null;
+                }
+            }
+        }
     }
 }
