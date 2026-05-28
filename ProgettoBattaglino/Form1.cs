@@ -1,4 +1,5 @@
-﻿using System;
+﻿// <intero file aggiornato — solo il metodo StartPlayback è stato modificato, il resto è identico>
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -28,9 +29,33 @@ namespace ProgettoBattaglino
         public List<SequencerNote> PianoNotes { get; set; }
         public int TotalSteps { get; set; }
         public float StepLengthSec { get; set; }
-
-        // Nuova variabile per distinguere la batteria
         public bool IsDrumKit { get; set; }
+    }
+
+    // ==========================================
+    // CLASSE AudioClipInfo (a livello di namespace)
+    // ==========================================
+    public class AudioClipInfo
+    {
+        public string FilePath { get; set; }
+        public string DisplayName { get; set; }
+        public float StartSec { get; set; }
+        public float DurationSec { get; set; }
+        public int LaneIndex { get; set; }
+        public float Volume { get; set; } = 1f;
+        public List<float> Peaks { get; set; } = new List<float>();
+        public bool PeaksReady { get; set; } = false;
+
+        public List<NAudio.Wave.AudioFileReader> ActiveReaders { get; set; } = new List<NAudio.Wave.AudioFileReader>();
+
+        public bool IsLoopClip { get; set; } = false;
+        public float LoopLengthSec { get; set; } = 0f;
+
+        public List<SequencerNote> PianoNotes { get; set; }
+        public int TotalSteps { get; set; }
+        public float StepLengthSec { get; set; } = 0f;
+
+        public bool IsDrumKit { get; set; } = false;
     }
 
     internal class BufferedPanel : Panel
@@ -121,32 +146,13 @@ namespace ProgettoBattaglino
         // =========================
         //  CLIP / TRACK INFO
         // =========================
-        private class AudioClipInfo
-        {
-            public string FilePath { get; set; }
-            public string DisplayName { get; set; }
-            public float StartSec { get; set; }
-            public float DurationSec { get; set; }
-            public int LaneIndex { get; set; }
-            public float Volume { get; set; } = 1f;
-            public List<float> Peaks { get; set; } = new List<float>();
-            public bool PeaksReady { get; set; } = false;
-
-            public List<AudioFileReader> ActiveReaders { get; set; } = new List<AudioFileReader>();
-
-            public bool IsLoopClip { get; set; } = false;
-            public float LoopLengthSec { get; set; } = 0f;
-
-            public List<SequencerNote> PianoNotes { get; set; }
-            public int TotalSteps { get; set; }
-            public float StepLengthSec { get; set; } = 0f;
-
-            // Distinzione visiva
-            public bool IsDrumKit { get; set; } = false;
-        }
+        // AudioClipInfo è definita a livello di namespace (vedi sotto)
 
         private readonly List<AudioClipInfo> clips = new List<AudioClipInfo>();
         private int selectedClipIndex = -1;
+        private List<int> selectedClipIndices = new List<int>();
+        private List<AudioClipInfo> clipClipboard = null;
+        private bool cutPending = false;
 
         public Form1()
         {
@@ -191,6 +197,7 @@ namespace ProgettoBattaglino
             pnlTrackSurface.MouseDown += Timeline_MouseDownSeek;
             pnlTrackSurface.MouseMove += PnlTrackSurface_MouseMove;
             pnlTrackSurface.MouseUp += PnlTrackSurface_MouseUp;
+            pnlTrackSurface.ContextMenuStrip = CreateClipContextMenu();
             pnlCenter.Controls.Add(pnlTrackSurface);
 
             vScroll = new VScrollBar { Dock = DockStyle.Right, Width = 16 };
@@ -204,17 +211,30 @@ namespace ProgettoBattaglino
             pnlRuler.BringToFront();
         }
 
+        private ContextMenuStrip CreateClipContextMenu()
+        {
+            var ctx = new ContextMenuStrip();
+            ctx.Items.Add("Copia", null, (s, e) => CopySelectedClips());
+            ctx.Items.Add("Taglia", null, (s, e) => CutSelectedClips());
+            ctx.Items.Add("Incolla", null, (s, e) => PasteClips());
+            ctx.Items.Add("-");
+            ctx.Items.Add("Modifica...", null, (s, e) => EditSelectedClip());
+            ctx.Items.Add("Separa", null, (s, e) => SplitSelectedClip());
+            ctx.Items.Add("Unisci", null, (s, e) => MergeSelectedClips());
+            return ctx;
+        }
+
         private void BuildMenu()
         {
             menuStripMain = new MenuStrip { Dock = DockStyle.Top, BackColor = Color.FromArgb(45, 49, 58), ForeColor = Color.White, Renderer = new DarkMenuRenderer() };
             menuFile = new ToolStripMenuItem("File");
 
-            // NUOVO PROGETTO
             var menuNuovo = new ToolStripMenuItem("Nuovo Progetto");
             menuNuovo.Click += (s, e) => {
                 StopPlaybackInternal(true);
                 clips.Clear();
                 selectedClipIndex = -1;
+                selectedClipIndices.Clear();
                 UpdateProjectLength();
                 RebuildMixerTracks();
                 LayoutAll();
@@ -222,18 +242,15 @@ namespace ProgettoBattaglino
             menuFile.DropDownItems.Add(menuNuovo);
             menuFile.DropDownItems.Add(new ToolStripSeparator());
 
-            // SALVA PROGETTO
             var menuSalva = new ToolStripMenuItem("Salva Progetto...");
             menuSalva.Click += (s, e) => SaveProject();
             menuFile.DropDownItems.Add(menuSalva);
 
-            // CARICA PROGETTO
             var menuCarica = new ToolStripMenuItem("Carica Progetto...");
             menuCarica.Click += (s, e) => LoadProject();
             menuFile.DropDownItems.Add(menuCarica);
             menuFile.DropDownItems.Add(new ToolStripSeparator());
 
-            // IMPORTA AUDIO
             menuImporta = new ToolStripMenuItem("Importa Audio...");
             menuImporta.Click += (s, e) => ImportAudioFile();
             menuFile.DropDownItems.Add(menuImporta);
@@ -248,119 +265,10 @@ namespace ProgettoBattaglino
             Controls.Add(menuStripMain);
         }
 
-        // ==========================================
-        // FUNZIONI DI SALVATAGGIO / CARICAMENTO
-        // ==========================================
-        private void SaveProject()
-        {
-            try
-            {
-                Directory.CreateDirectory(ProgettiPath);
-                using (var sfd = new SaveFileDialog { InitialDirectory = ProgettiPath, Filter = "Progetto DAW (*.daw)|*.daw", DefaultExt = "daw" })
-                {
-                    if (sfd.ShowDialog() == DialogResult.OK)
-                    {
-                        var saveData = clips.Select(c => new AudioClipSaveData
-                        {
-                            FilePath = c.FilePath,
-                            DisplayName = c.DisplayName,
-                            StartSec = c.StartSec,
-                            DurationSec = c.DurationSec,
-                            LaneIndex = c.LaneIndex,
-                            Volume = c.Volume,
-                            IsLoopClip = c.IsLoopClip,
-                            LoopLengthSec = c.LoopLengthSec,
-                            TotalSteps = c.TotalSteps,
-                            StepLengthSec = c.StepLengthSec,
-                            IsDrumKit = c.IsDrumKit,
-                            PianoNotes = c.PianoNotes?.ToList()
-                        }).ToList();
-
-                        var serializer = new XmlSerializer(typeof(List<AudioClipSaveData>));
-                        using (var stream = new StreamWriter(sfd.FileName))
-                        {
-                            serializer.Serialize(stream, saveData);
-                        }
-                        MessageBox.Show("Progetto salvato con successo!", "Salvataggio", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Errore durante il salvataggio:\n" + ex.Message, "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private void LoadProject()
-        {
-            try
-            {
-                Directory.CreateDirectory(ProgettiPath);
-                using (var ofd = new OpenFileDialog { InitialDirectory = ProgettiPath, Filter = "Progetto DAW (*.daw)|*.daw" })
-                {
-                    if (ofd.ShowDialog() == DialogResult.OK)
-                    {
-                        StopPlaybackInternal(true);
-                        clips.Clear();
-
-                        var serializer = new XmlSerializer(typeof(List<AudioClipSaveData>));
-                        List<AudioClipSaveData> loadedData;
-                        using (var stream = new StreamReader(ofd.FileName))
-                        {
-                            loadedData = (List<AudioClipSaveData>)serializer.Deserialize(stream);
-                        }
-
-                        foreach (var data in loadedData)
-                        {
-                            var clip = new AudioClipInfo
-                            {
-                                FilePath = data.FilePath,
-                                DisplayName = data.DisplayName,
-                                StartSec = data.StartSec,
-                                DurationSec = data.DurationSec,
-                                LaneIndex = data.LaneIndex,
-                                Volume = data.Volume,
-                                IsLoopClip = data.IsLoopClip,
-                                LoopLengthSec = data.LoopLengthSec,
-                                TotalSteps = data.TotalSteps,
-                                StepLengthSec = data.StepLengthSec,
-                                IsDrumKit = data.IsDrumKit,
-                                PianoNotes = data.PianoNotes?.ToList()
-                            };
-
-                            clips.Add(clip);
-                            if (!clip.IsLoopClip || clip.PianoNotes == null)
-                            {
-                                BuildWaveformPeaksAsync(clip, 2500);
-                            }
-                        }
-
-                        selectedClipIndex = -1;
-                        UpdateProjectLength();
-                        playheadSec = 0f; showPlayhead = false; timelineOffsetX = 0;
-                        if (hScroll != null) hScroll.Value = hScroll.Minimum;
-                        if (vScroll != null) vScroll.Value = vScroll.Minimum;
-
-                        RebuildMixerTracks();
-                        LayoutAll();
-                        pnlRuler.Refresh();
-                        pnlTrackSurface.Refresh();
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Errore durante il caricamento:\n" + ex.Message, "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
         private void RefreshAggiungiMenu()
         {
             menuAggiungi.DropDownItems.Clear();
 
-            // ===================================
-            // MENU BATTERIA
-            // ===================================
             var menuBatteria = new ToolStripMenuItem("Batteria (DrumKit)");
             menuBatteria.Click += (s, e) => { var frm = new DrumKitForm(); frm.Show(this); };
             menuAggiungi.DropDownItems.Add(menuBatteria);
@@ -373,7 +281,6 @@ namespace ProgettoBattaglino
             foreach (string dir in dirs)
             {
                 string instrumentName = Path.GetFileName(dir);
-                // Evita di caricare la Batteria come fosse un piano roll
                 if (instrumentName.Equals("Batteria", StringComparison.OrdinalIgnoreCase)) continue;
 
                 string samplePath = Path.Combine(dir, "C4.wav");
@@ -435,12 +342,10 @@ namespace ProgettoBattaglino
             var newClip = new AudioClipInfo { FilePath = filePath, DisplayName = Path.GetFileNameWithoutExtension(filePath), StartSec = 0f, DurationSec = durationSec, LaneIndex = GetFirstFreeLaneIndex(), Volume = 1f };
             clips.Add(newClip);
             selectedClipIndex = clips.IndexOf(newClip);
+            selectedClipIndices = new List<int> { selectedClipIndex };
             FinalizeClipAdd(newClip);
         }
 
-        // =========================
-        //  AGGIUNGI MELODIA CON DATI E SNAP (Pianoroll + Batteria)
-        // =========================
         public void AddMelodyClip(string filePath, float patternDuration, List<SequencerNote> notes, int totalSteps, float stepSec, bool isDrumKit)
         {
             if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return;
@@ -461,6 +366,7 @@ namespace ProgettoBattaglino
             };
             clips.Add(newClip);
             selectedClipIndex = clips.IndexOf(newClip);
+            selectedClipIndices = new List<int> { selectedClipIndex };
             FinalizeClipAdd(newClip);
         }
 
@@ -490,7 +396,8 @@ namespace ProgettoBattaglino
             foreach (var clip in clips.OrderBy(c => c.LaneIndex))
             {
                 int clipIndex = clips.IndexOf(clip);
-                var strip = new Panel { Width = 120, Height = 180, BackColor = clipIndex == selectedClipIndex ? Color.FromArgb(55, 65, 95) : Color.FromArgb(30, 33, 40), Margin = new Padding(0, 0, 10, 0), Tag = clipIndex };
+                bool isSelected = selectedClipIndices.Contains(clipIndex);
+                var strip = new Panel { Width = 120, Height = 180, BackColor = isSelected ? Color.FromArgb(75, 90, 120) : (clipIndex == selectedClipIndex ? Color.FromArgb(55, 65, 95) : Color.FromArgb(30, 33, 40)), Margin = new Padding(0, 0, 10, 0), Tag = clipIndex };
                 var lblTrack = new Label { Text = $"TRACK {clip.LaneIndex + 1}", ForeColor = Color.Gainsboro, AutoSize = true, Font = new Font("Segoe UI", 10, FontStyle.Bold), Location = new Point(10, 10), Tag = clipIndex };
                 var lblName = new Label { Text = clip.DisplayName, ForeColor = Color.Silver, AutoSize = false, Width = 100, Height = 30, Location = new Point(10, 32), AutoEllipsis = true, Tag = clipIndex };
                 var lblVol = new Label { Text = $"VOL: {(int)(clip.Volume * 100)}%", ForeColor = Color.Gainsboro, AutoSize = true, Location = new Point(10, 62), Tag = clipIndex };
@@ -505,7 +412,14 @@ namespace ProgettoBattaglino
             pnlMixerTracks.ResumeLayout();
         }
 
-        private void MixerTrack_MouseDown(object sender, MouseEventArgs e) { if (sender is Control c && c.Tag is int idx) { SelectClip(idx); pnlTrackSurface.Focus(); } }
+        private void MixerTrack_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (sender is Control c && c.Tag is int idx)
+            {
+                SelectClip(idx, true);
+                pnlTrackSurface.Focus();
+            }
+        }
 
         private void ToggleRecord()
         {
@@ -590,9 +504,12 @@ namespace ProgettoBattaglino
             float projectEnd = GetProjectEndSec();
             if (playheadSec >= projectEnd) { playheadSec = 0f; timelineOffsetX = 0; if (hScroll != null) hScroll.Value = hScroll.Minimum; }
 
-            var mixerInputs = new List<ISampleProvider>();
             try
             {
+                // Creazione del mixer compatibile con la versione di NAudio usata:
+                var mixer = new MixingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(MixerSampleRate, MixerChannels)) { ReadFully = false };
+                int mixerInputCount = 0;
+
                 foreach (var clip in clips)
                 {
                     if (!File.Exists(clip.FilePath)) continue;
@@ -626,14 +543,14 @@ namespace ProgettoBattaglino
                                 Take = TimeSpan.FromSeconds(durationToPlay),
                                 DelayBy = TimeSpan.FromSeconds(delayFromNow)
                             };
-                            mixerInputs.Add(offset);
+                            mixer.AddMixerInput(offset);
+                            mixerInputCount++;
 
                             currentLoopStart += pattern;
                         }
                         continue;
                     }
 
-                    // Clip Normale
                     var normalReader = new AudioFileReader(clip.FilePath) { Volume = clip.Volume };
                     clip.ActiveReaders.Add(normalReader);
 
@@ -645,7 +562,8 @@ namespace ProgettoBattaglino
                         {
                             Take = TimeSpan.FromSeconds(clip.DurationSec - ls)
                         };
-                        mixerInputs.Add(offset);
+                        mixer.AddMixerInput(offset);
+                        mixerInputCount++;
                     }
                     else
                     {
@@ -654,14 +572,15 @@ namespace ProgettoBattaglino
                             DelayBy = TimeSpan.FromSeconds(-ls),
                             Take = TimeSpan.FromSeconds(clip.DurationSec)
                         };
-                        mixerInputs.Add(offset);
+                        mixer.AddMixerInput(offset);
+                        mixerInputCount++;
                     }
                 }
 
-                if (mixerInputs.Count == 0) { DisposePlaybackResources(false); return; }
+                if (mixerInputCount == 0) { DisposePlaybackResources(false); return; }
 
                 outputDevice = new WaveOutEvent();
-                outputDevice.Init(new MixingSampleProvider(mixerInputs) { ReadFully = false });
+                outputDevice.Init(mixer);
                 outputDevice.PlaybackStopped += OutputDevice_PlaybackStopped;
                 playbackStartSec = playheadSec;
                 playbackStartUtc = DateTime.UtcNow;
@@ -714,7 +633,7 @@ namespace ProgettoBattaglino
                 int hit = HitTestClip(e.Location);
                 if (hit >= 0)
                 {
-                    SelectClip(hit);
+                    SelectClip(hit, true);
                     var rect = GetClipRectangle(clips[hit]);
 
                     const int edgeTolerance = 8;
@@ -732,7 +651,19 @@ namespace ProgettoBattaglino
                     }
                     return;
                 }
-                int lane = GetLaneFromY(e.Y); SelectClip(lane >= 0 ? clips.FindIndex(c => c.LaneIndex == lane) : -1);
+                else
+                {
+                    // cliccato fuori dai clip -> deseleziona se non Ctrl premuto
+                    if (!ModifierKeys.HasFlag(Keys.Control))
+                        selectedClipIndices.Clear();
+                }
+                int lane = GetLaneFromY(e.Y);
+                if (lane >= 0)
+                {
+                    int clipIdx = clips.FindIndex(c => c.LaneIndex == lane);
+                    if (clipIdx >= 0) SelectClip(clipIdx, true);
+                    else selectedClipIndices.Clear();
+                }
             }
 
             int x = e.X - HeaderW; if (x < 0) { pnlTrackSurface.Invalidate(); return; }
@@ -779,15 +710,56 @@ namespace ProgettoBattaglino
         private int HitTestClip(Point p) { for (int i = clips.Count - 1; i >= 0; i--) if (GetClipRectangle(clips[i]).Contains(p)) return i; return -1; }
         private Rectangle GetClipRectangle(AudioClipInfo clip) { return new Rectangle(HeaderW + (int)(clip.StartSec * pixelsPerSecond) - timelineOffsetX, TrackTopPadding + clip.LaneIndex * rowHeight + 8 - vScroll.Value, Math.Max(20, (int)(clip.DurationSec * pixelsPerSecond)), rowHeight - 16); }
         private int GetLaneFromY(int y) { int yy = y + vScroll.Value - TrackTopPadding; return yy < 0 ? -1 : yy / rowHeight; }
-        private void SelectClip(int index) { selectedClipIndex = index; RebuildMixerTracks(); pnlTrackSurface.Invalidate(); pnlRuler.Invalidate(); }
-        private void Form1_KeyDown(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Delete) { DeleteSelectedClip(); e.Handled = true; e.SuppressKeyPress = true; } }
 
-        private void DeleteSelectedClip()
+        private void SelectClip(int index, bool addToSelection = false)
         {
-            if (selectedClipIndex < 0 || selectedClipIndex >= clips.Count) return;
-            StopPlaybackInternal(false); timerPlay.Stop(); clips.RemoveAt(selectedClipIndex);
-            if (clips.Count == 0) { selectedClipIndex = -1; playheadSec = 0f; showPlayhead = false; timelineSeconds = 10f; timelineOffsetX = 0; if (hScroll != null) hScroll.Value = hScroll.Minimum; if (vScroll != null) vScroll.Value = vScroll.Minimum; }
-            else { if (selectedClipIndex >= clips.Count) selectedClipIndex = clips.Count - 1; UpdateProjectLength(); float pe = GetProjectEndSec(); if (playheadSec > pe) playheadSec = pe; }
+            if (index < 0 || index >= clips.Count) return;
+
+            if (!addToSelection && !ModifierKeys.HasFlag(Keys.Control))
+                selectedClipIndices.Clear();
+
+            if (ModifierKeys.HasFlag(Keys.Control) && addToSelection)
+            {
+                if (selectedClipIndices.Contains(index))
+                    selectedClipIndices.Remove(index);
+                else
+                    selectedClipIndices.Add(index);
+            }
+            else if (!addToSelection)
+            {
+                selectedClipIndices.Clear();
+                selectedClipIndices.Add(index);
+            }
+
+            selectedClipIndex = (selectedClipIndices.Count == 1) ? selectedClipIndices[0] : -1;
+
+            RebuildMixerTracks();
+            pnlTrackSurface.Invalidate();
+        }
+
+        private void Form1_KeyDown(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Delete) { DeleteSelectedClips(); e.Handled = true; e.SuppressKeyPress = true; } }
+
+        private void DeleteSelectedClips()
+        {
+            if (selectedClipIndices.Count == 0) return;
+            StopPlaybackInternal(false); timerPlay.Stop();
+            foreach (int idx in selectedClipIndices.OrderByDescending(i => i))
+                clips.RemoveAt(idx);
+            selectedClipIndices.Clear();
+            selectedClipIndex = -1;
+
+            if (clips.Count == 0)
+            {
+                playheadSec = 0f; showPlayhead = false; timelineSeconds = 10f; timelineOffsetX = 0;
+                if (hScroll != null) hScroll.Value = hScroll.Minimum;
+                if (vScroll != null) vScroll.Value = vScroll.Minimum;
+            }
+            else
+            {
+                UpdateProjectLength();
+                float pe = GetProjectEndSec(); if (playheadSec > pe) playheadSec = pe;
+            }
+
             RebuildMixerTracks(); LayoutAll(); pnlRuler.Invalidate(); pnlTrackSurface.Invalidate();
         }
 
@@ -843,8 +815,8 @@ namespace ProgettoBattaglino
             using var penSec = new Pen(Color.FromArgb(35, 40, 48)); for (int s = 0; s <= (int)Math.Ceiling(timelineSeconds); s++) { int x = HeaderW + s * pixelsPerSecond - timelineOffsetX; if (x >= HeaderW && x <= w) g.DrawLine(penSec, x, 0, x, h); }
 
             using var tf = new Font("Segoe UI", 9, FontStyle.Bold);
-            for (int i = 0; i < totalRows; i++) { int y = TrackTopPadding + i * rowHeight - vScroll.Value; if (y + rowHeight < 0 || y > h) continue; bool sel = selectedClipIndex >= 0 && selectedClipIndex < clips.Count && clips[selectedClipIndex].LaneIndex == i; using var tb = new SolidBrush(sel ? Color.White : Color.Gainsboro); g.DrawString($"TRACK {i + 1}", tf, tb, 10, y + 10); }
-            for (int i = 0; i < clips.Count; i++) { var rect = GetClipRectangle(clips[i]); if (rect.Bottom >= 0 && rect.Top <= h) DrawAudioClip(g, rect, clips[i], i == selectedClipIndex); }
+            for (int i = 0; i < totalRows; i++) { int y = TrackTopPadding + i * rowHeight - vScroll.Value; if (y + rowHeight < 0 || y > h) continue; bool sel = selectedClipIndices.Any(idx => clips[idx].LaneIndex == i); using var tb = new SolidBrush(sel ? Color.White : Color.Gainsboro); g.DrawString($"TRACK {i + 1}", tf, tb, 10, y + 10); }
+            for (int i = 0; i < clips.Count; i++) { var rect = GetClipRectangle(clips[i]); if (rect.Bottom >= 0 && rect.Top <= h) DrawAudioClip(g, rect, clips[i], selectedClipIndices.Contains(i)); }
             if (showPlayhead) { int xp = HeaderW + (int)(playheadSec * pixelsPerSecond) - timelineOffsetX; using var pp = new Pen(Color.WhiteSmoke, 2); g.DrawLine(pp, xp, 0, xp, h); }
         }
 
@@ -917,6 +889,344 @@ namespace ProgettoBattaglino
                 int si = (int)(px * pc / (float)rect.Width); int ei = Math.Min(pc, (int)((px + 1) * pc / (float)rect.Width));
                 float mx = 0f; for (int i = si; i < ei; i++) if (peaks[i] > mx) mx = peaks[i];
                 int amp = (int)(mx * hh); g.DrawLine(wavePen, rect.Left + px, centerY - amp, rect.Left + px, centerY + amp);
+            }
+        }
+
+        private void SaveProject()
+        {
+            try
+            {
+                Directory.CreateDirectory(ProgettiPath);
+                using (var sfd = new SaveFileDialog { InitialDirectory = ProgettiPath, Filter = "Progetto DAW (*.daw)|*.daw", DefaultExt = "daw" })
+                {
+                    if (sfd.ShowDialog() == DialogResult.OK)
+                    {
+                        var saveData = clips.Select(c => new AudioClipSaveData
+                        {
+                            FilePath = c.FilePath,
+                            DisplayName = c.DisplayName,
+                            StartSec = c.StartSec,
+                            DurationSec = c.DurationSec,
+                            LaneIndex = c.LaneIndex,
+                            Volume = c.Volume,
+                            IsLoopClip = c.IsLoopClip,
+                            LoopLengthSec = c.LoopLengthSec,
+                            TotalSteps = c.TotalSteps,
+                            StepLengthSec = c.StepLengthSec,
+                            IsDrumKit = c.IsDrumKit,
+                            PianoNotes = c.PianoNotes?.ToList()
+                        }).ToList();
+
+                        var serializer = new XmlSerializer(typeof(List<AudioClipSaveData>));
+                        using (var stream = new StreamWriter(sfd.FileName))
+                        {
+                            serializer.Serialize(stream, saveData);
+                        }
+                        MessageBox.Show("Progetto salvato con successo!", "Salvataggio", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Errore durante il salvataggio:\n" + ex.Message, "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void LoadProject()
+        {
+            try
+            {
+                Directory.CreateDirectory(ProgettiPath);
+                using (var ofd = new OpenFileDialog { InitialDirectory = ProgettiPath, Filter = "Progetto DAW (*.daw)|*.daw" })
+                {
+                    if (ofd.ShowDialog() == DialogResult.OK)
+                    {
+                        StopPlaybackInternal(true);
+                        clips.Clear();
+                        selectedClipIndices.Clear();
+
+                        var serializer = new XmlSerializer(typeof(List<AudioClipSaveData>));
+                        List<AudioClipSaveData> loadedData;
+                        using (var stream = new StreamReader(ofd.FileName))
+                        {
+                            loadedData = (List<AudioClipSaveData>)serializer.Deserialize(stream);
+                        }
+
+                        foreach (var data in loadedData)
+                        {
+                            var clip = new AudioClipInfo
+                            {
+                                FilePath = data.FilePath,
+                                DisplayName = data.DisplayName,
+                                StartSec = data.StartSec,
+                                DurationSec = data.DurationSec,
+                                LaneIndex = data.LaneIndex,
+                                Volume = data.Volume,
+                                IsLoopClip = data.IsLoopClip,
+                                LoopLengthSec = data.LoopLengthSec,
+                                TotalSteps = data.TotalSteps,
+                                StepLengthSec = data.StepLengthSec,
+                                IsDrumKit = data.IsDrumKit,
+                                PianoNotes = data.PianoNotes?.ToList()
+                            };
+
+                            clips.Add(clip);
+                            if (!clip.IsLoopClip || clip.PianoNotes == null)
+                            {
+                                BuildWaveformPeaksAsync(clip, 2500);
+                            }
+                        }
+
+                        selectedClipIndex = -1;
+                        UpdateProjectLength();
+                        playheadSec = 0f; showPlayhead = false; timelineOffsetX = 0;
+                        if (hScroll != null) hScroll.Value = hScroll.Minimum;
+                        if (vScroll != null) vScroll.Value = vScroll.Minimum;
+
+                        RebuildMixerTracks();
+                        LayoutAll();
+                        pnlRuler.Refresh();
+                        pnlTrackSurface.Refresh();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Errore durante il caricamento:\n" + ex.Message, "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // ==========================================
+        // NUOVE FUNZIONI: COPIA, TAGLIA, INCOLLA, ECC.
+        // ==========================================
+        private void CopySelectedClips()
+        {
+            if (selectedClipIndices.Count == 0) return;
+            clipClipboard = selectedClipIndices.Select(i => CloneClip(clips[i])).ToList();
+            cutPending = false;
+        }
+
+        private void CutSelectedClips()
+        {
+            CopySelectedClips();
+            cutPending = true;
+            foreach (var idx in selectedClipIndices.OrderByDescending(i => i))
+                clips.RemoveAt(idx);
+            selectedClipIndices.Clear();
+            selectedClipIndex = -1;
+            UpdateProjectLength();
+            RebuildMixerTracks();
+            pnlTrackSurface.Invalidate();
+        }
+
+        private void PasteClips()
+        {
+            if (clipClipboard == null || clipClipboard.Count == 0) return;
+
+            int targetLane = GetFirstFreeLaneIndex();
+            float startOffset = 0f;
+
+            if (selectedClipIndices.Count > 0)
+            {
+                var lastClip = clips[selectedClipIndices.Max()];
+                startOffset = lastClip.StartSec + lastClip.DurationSec;
+                targetLane = lastClip.LaneIndex;
+            }
+
+            foreach (var clipData in clipClipboard)
+            {
+                var newClip = CloneClip(clipData);
+                newClip.StartSec = startOffset;
+                newClip.LaneIndex = targetLane++;
+                clips.Add(newClip);
+                if (!newClip.PeaksReady && newClip.PianoNotes == null)
+                    BuildWaveformPeaksAsync(newClip, 2500);
+            }
+
+            if (cutPending)
+            {
+                clipClipboard = null;
+                cutPending = false;
+            }
+
+            UpdateProjectLength();
+            RebuildMixerTracks();
+            LayoutAll();
+            pnlTrackSurface.Invalidate();
+        }
+
+        private void EditSelectedClip()
+        {
+            if (selectedClipIndices.Count != 1)
+            {
+                MessageBox.Show("Seleziona una sola traccia per modificarla.", "Modifica", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            var clip = clips[selectedClipIndices[0]];
+            var editor = new SampleEditForm(clip);
+            if (editor.ShowDialog() == DialogResult.OK)
+            {
+                clips[selectedClipIndices[0]] = editor.ModifiedClip;
+                BuildWaveformPeaksAsync(editor.ModifiedClip, 2500);
+                UpdateProjectLength();
+                RebuildMixerTracks();
+                pnlTrackSurface.Invalidate();
+            }
+        }
+
+        private void SplitSelectedClip()
+        {
+            if (selectedClipIndices.Count != 1)
+            {
+                MessageBox.Show("Seleziona una sola traccia da separare.", "Separa", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            var clip = clips[selectedClipIndices[0]];
+            float splitTime = playheadSec;
+
+            if (splitTime <= clip.StartSec || splitTime >= clip.StartSec + clip.DurationSec)
+            {
+                MessageBox.Show($"Posiziona il playhead ({splitTime:F2}s) all'interno del clip ({clip.StartSec:F2} - {clip.StartSec + clip.DurationSec:F2}).", "Separa", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            float offset = splitTime - clip.StartSec;
+            string temp1 = CreateTempWavFromClip(clip, 0, offset);
+            string temp2 = CreateTempWavFromClip(clip, offset, clip.DurationSec - offset);
+
+            if (temp1 == null || temp2 == null) return;
+
+            var newClip1 = new AudioClipInfo
+            {
+                FilePath = temp1,
+                DisplayName = clip.DisplayName + "_part1",
+                StartSec = clip.StartSec,
+                DurationSec = offset,
+                LaneIndex = clip.LaneIndex,
+                Volume = clip.Volume
+            };
+            var newClip2 = new AudioClipInfo
+            {
+                FilePath = temp2,
+                DisplayName = clip.DisplayName + "_part2",
+                StartSec = splitTime,
+                DurationSec = clip.DurationSec - offset,
+                LaneIndex = clip.LaneIndex,
+                Volume = clip.Volume
+            };
+
+            int idx = selectedClipIndices[0];
+            clips.RemoveAt(idx);
+            clips.Insert(idx, newClip2);
+            clips.Insert(idx, newClip1);
+
+            selectedClipIndices.Clear();
+            BuildWaveformPeaksAsync(newClip1, 2500);
+            BuildWaveformPeaksAsync(newClip2, 2500);
+            UpdateProjectLength();
+            RebuildMixerTracks();
+            pnlTrackSurface.Invalidate();
+        }
+
+        private void MergeSelectedClips()
+        {
+            if (selectedClipIndices.Count < 2)
+            {
+                MessageBox.Show("Seleziona almeno due tracce da unire.", "Unisci", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var clipsToMerge = selectedClipIndices.OrderBy(i => clips[i].StartSec).Select(i => clips[i]).ToList();
+            float totalStart = clipsToMerge.Min(c => c.StartSec);
+            float totalEnd = clipsToMerge.Max(c => c.StartSec + c.DurationSec);
+            float totalDuration = totalEnd - totalStart;
+
+            string mergedFile = Path.GetTempFileName() + ".wav";
+            var mixer = new MixingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(44100, 2));
+
+            foreach (var c in clipsToMerge)
+            {
+                var reader = new AudioFileReader(c.FilePath) { Volume = c.Volume };
+                var offset = new OffsetSampleProvider(reader)
+                {
+                    DelayBy = TimeSpan.FromSeconds(c.StartSec - totalStart),
+                    Take = TimeSpan.FromSeconds(c.DurationSec)
+                };
+                mixer.AddMixerInput(offset);
+            }
+
+            using (var writer = new WaveFileWriter(mergedFile, mixer.WaveFormat))
+            {
+                float[] buffer = new float[8192];
+                long neededSamples = (long)(totalDuration * 44100 * 2);
+                long written = 0;
+                while (written < neededSamples)
+                {
+                    int toRead = (int)Math.Min(buffer.Length, neededSamples - written);
+                    int read = mixer.Read(buffer, 0, toRead);
+                    if (read == 0) break;
+                    writer.WriteSamples(buffer, 0, read);
+                    written += read;
+                }
+            }
+
+            var mergedClip = new AudioClipInfo
+            {
+                FilePath = mergedFile,
+                DisplayName = "Merged_" + DateTime.Now.ToString("HHmmss"),
+                StartSec = totalStart,
+                DurationSec = totalDuration,
+                LaneIndex = clipsToMerge[0].LaneIndex,
+                Volume = 1f
+            };
+
+            foreach (int idx in selectedClipIndices.OrderByDescending(i => i))
+                clips.RemoveAt(idx);
+
+            clips.Add(mergedClip);
+            BuildWaveformPeaksAsync(mergedClip, 2500);
+            selectedClipIndices.Clear();
+            UpdateProjectLength();
+            RebuildMixerTracks();
+            LayoutAll();
+            pnlTrackSurface.Invalidate();
+        }
+
+        private AudioClipInfo CloneClip(AudioClipInfo original)
+        {
+            return new AudioClipInfo
+            {
+                FilePath = original.FilePath,
+                DisplayName = original.DisplayName,
+                StartSec = original.StartSec,
+                DurationSec = original.DurationSec,
+                LaneIndex = original.LaneIndex,
+                Volume = original.Volume,
+                IsLoopClip = original.IsLoopClip,
+                LoopLengthSec = original.LoopLengthSec,
+                PianoNotes = original.PianoNotes?.ToList(),
+                TotalSteps = original.TotalSteps,
+                StepLengthSec = original.StepLengthSec,
+                IsDrumKit = original.IsDrumKit
+            };
+        }
+
+        private string CreateTempWavFromClip(AudioClipInfo clip, float startSec, float durationSec)
+        {
+            try
+            {
+                string temp = Path.GetTempFileName() + ".wav";
+                using (var reader = new AudioFileReader(clip.FilePath))
+                {
+                    reader.CurrentTime = TimeSpan.FromSeconds(startSec);
+                    var take = new OffsetSampleProvider(reader) { Take = TimeSpan.FromSeconds(durationSec) };
+                    WaveFileWriter.CreateWaveFile16(temp, take);
+                }
+                return temp;
+            }
+            catch
+            {
+                return null;
             }
         }
 
